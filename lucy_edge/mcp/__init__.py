@@ -31,7 +31,6 @@ Phone / safety rules
 
 from __future__ import annotations
 
-import abc
 import asyncio
 import json
 import re
@@ -41,6 +40,9 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+
+from .base import MCPTransport, MCPTransportError
+from .transport import HttpTransport, StdioTransport
 
 
 # --------------------------------------------------------------------------- #
@@ -218,31 +220,6 @@ def _looks_like_secret_key(key: str) -> bool:
 # Transport abstraction
 # --------------------------------------------------------------------------- #
 
-class MCPTransport(abc.ABC):
-    """Minimal MCP transport.
-
-    Implementations handle one JSON-RPC request/response exchange.  They are
-    deliberately tiny: Lucy needs ``initialize``, ``tools/list``, and
-    ``tools/call`` — not the full specification.
-    """
-
-    @abc.abstractmethod
-    async def initialize(self, timeout: float) -> dict[str, Any]:
-        """Perform the MCP ``initialize`` handshake and return server info."""
-
-    @abc.abstractmethod
-    async def list_tools(self, timeout: float) -> list[dict[str, Any]]:
-        """Return the server's ``tools/list`` response."""
-
-    @abc.abstractmethod
-    async def call_tool(self, name: str, args: dict[str, Any], timeout: float) -> dict[str, Any]:
-        """Invoke ``tools.call`` and return the raw result envelope."""
-
-    @abc.abstractmethod
-    async def close(self) -> None:
-        """Release any resources (process handles, connections)."""
-
-
 class FakeMCPTransport(MCPTransport):
     """Deterministic in-memory transport for tests.
 
@@ -281,13 +258,6 @@ class FakeMCPTransport(MCPTransport):
 
     async def close(self) -> None:
         self.closed = True
-
-
-class MCPTransportError(Exception):
-    """Transport-level failure (connection, timeout, protocol)."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -520,14 +490,24 @@ class MCPRegistry:
             )
 
     def _client_for(self, sc: MCPServerConfig) -> MCPServerClient:
-        # In a real build, transport would be constructed from sc.transport /
-        # sc.command / sc.url.  For the phone-safe module the default transport
-        # is a FakeMCPTransport (tests inject their own).  A production wiring
-        # layer (not shipped here) builds the stdio/http transport.
+        # Tests may inject a transport via sc._transport.  Otherwise build the
+        # real transport from the server config (stdio or http).  If the config
+        # is incomplete (empty command/url), fall back to a transport that fails
+        # initialize cleanly — MCP must never crash the host over bad config.
         transport = getattr(sc, "_transport", None)
         if transport is None:
-            transport = FakeMCPTransport()
+            try:
+                transport = self._build_transport(sc)
+            except MCPTransportError as exc:
+                transport = FakeMCPTransport(fail_initialize=str(exc))
         return MCPServerClient(sc, transport, self.allowlist)
+
+    @staticmethod
+    def _build_transport(sc: MCPServerConfig) -> MCPTransport:
+        if sc.transport == "http":
+            return HttpTransport(sc.url, sc.headers)
+        # Default: stdio subprocess transport.
+        return StdioTransport(sc.command, sc.args, sc.env)
 
 
 # --------------------------------------------------------------------------- #
