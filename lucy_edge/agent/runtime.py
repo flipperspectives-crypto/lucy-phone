@@ -20,7 +20,7 @@ from ..tools.permissions import PermissionOutcome
 from ..tools.registry import ToolRegistry
 from .executor import Executor
 from .limits import AgentLimits
-from .planner import Plan, PlanStep, RulePlanner
+from .planner import Plan, PlanStep
 from .verifier import Verifier
 
 
@@ -109,7 +109,7 @@ class AgentRuntime:
         goal: str,
         limits: AgentLimits,
         registry: ToolRegistry,
-        planner: Optional[RulePlanner] = None,
+        planner: Any = None,
         verifier: Optional[Verifier] = None,
         evidence: Any = None,
         memory_retrieval: Any = None,
@@ -119,7 +119,12 @@ class AgentRuntime:
         self.goal = goal
         self.limits = limits
         self.registry = registry
-        self.planner = planner or RulePlanner(limits)
+        if planner is not None:
+            self.planner = planner
+        else:
+            from .planner import RulePlanner
+
+            self.planner = RulePlanner(limits)
         self.verifier = verifier or Verifier(limits.max_output_chars)
         self.evidence = evidence
         self.memory_retrieval = memory_retrieval

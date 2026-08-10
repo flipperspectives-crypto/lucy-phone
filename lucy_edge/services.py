@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .agent.limits import AgentLimits, limits_from_config
+from .agent.planner import ModelDrivenPlanner, RulePlanner
+from .agent.planner_provider import MockPlannerProvider, ModelPlannerProvider
 from .agent.runtime import AgentRuntime
 from .config import LucyEdgeConfig
 from .evidence.ledger import EvidenceLedger
@@ -55,6 +57,7 @@ class LucyEdgeServices:
     introspection: LucyIntrospection
     context: ToolContext
     agent_limits: AgentLimits
+    planner: Any
     auth: AuthService
     rate_limiter: RateLimiter
     foundation: Optional["FoundationGuard"] = None
@@ -86,6 +89,7 @@ class LucyEdgeServices:
             goal=goal,
             limits=limits or self.agent_limits,
             registry=self.tools,
+            planner=self.planner,
             evidence=self.evidence,
             memory_retrieval=self.retrieval,
             context=self.context,
@@ -164,6 +168,20 @@ def build_services(
     context.introspection = None  # filled below
 
     agent_limits = limits_from_config(config)
+
+    # Build the agent planner.  Phone-safe default is the rule-based planner.
+    # When planner_backend == "model", use ModelDrivenPlanner: on a phone the
+    # ModelProvider routes through ModelRouter (which denies local inference
+    # and falls back to the deterministic MockProvider), so no real model runs.
+    if config.agent.planner_backend == "model":
+        if config.host_role == "PHONE":
+            _provider = MockPlannerProvider()
+        else:
+            _provider = ModelPlannerProvider(config, router, providers)
+        planner = ModelDrivenPlanner(agent_limits, _provider)
+    else:
+        planner = RulePlanner(agent_limits)
+
     capabilities = CapabilityIntrospection(
         config=config,
         providers=providers,
@@ -174,6 +192,7 @@ def build_services(
         tools=tools,
         agent_limits=agent_limits,
         policy=policy,
+        planner=planner,
     )
     introspection = LucyIntrospection(capabilities, config)
     context.introspection = introspection
@@ -206,6 +225,7 @@ def build_services(
         introspection=introspection,
         context=context,
         agent_limits=agent_limits,
+        planner=planner,
         auth=auth,
         rate_limiter=rate_limiter,
         workspace=workspace,

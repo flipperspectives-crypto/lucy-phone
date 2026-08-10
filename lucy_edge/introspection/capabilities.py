@@ -24,6 +24,7 @@ class CapabilityIntrospection:
         tools: Any,
         agent_limits: Any,
         policy: Any,
+        planner: Any = None,
     ) -> None:
         self.config = config
         self.providers = providers
@@ -34,6 +35,7 @@ class CapabilityIntrospection:
         self.tools = tools
         self.agent_limits = agent_limits
         self.policy = policy
+        self.planner = planner
 
     async def capabilities_report(self) -> dict[str, Any]:
         memory_count = (
@@ -123,8 +125,8 @@ class CapabilityIntrospection:
             },
             "agent": {
                 "enabled": True,
-                "planner_backend": "RULE_BASED",
-                "planner_is_model_driven": False,
+                "planner_backend": self._planner_backend(),
+                "planner_is_model_driven": self._planner_is_model_driven(),
                 "limits": self.agent_limits.model_dump() if self.agent_limits else None,
                 "bounded": True,
                 "autonomous_replication": False,
@@ -163,6 +165,14 @@ class CapabilityIntrospection:
 
     def retrieval_configured(self) -> bool:
         return getattr(self.config, "memory", None) is not None
+
+    def _planner_backend(self) -> str:
+        if self.planner is None:
+            return "NONE"
+        return getattr(self.planner, "backend", "RULE_BASED")
+
+    def _planner_is_model_driven(self) -> bool:
+        return self._planner_backend() == "MODEL_DRIVEN"
 
     async def runtime_report(self) -> dict[str, Any]:
         return await self.capabilities_report()

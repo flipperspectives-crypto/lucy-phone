@@ -94,6 +94,12 @@ class AgentConfig(BaseModel):
     task_timeout: float = 30.0
     tool_timeout: float = 10.0
     max_output_chars: int = 10_000
+    # "rule"  -> RulePlanner (deterministic, phone-safe default)
+    # "model" -> ModelDrivenPlanner with a pluggable PlannerProvider.
+    #            On a phone (local inference disabled) the ModelProvider routes
+    #            through ModelRouter, which denies local inference and falls
+    #            back to the mock provider — so NO real model runs on phone.
+    planner_backend: str = "rule"
 
 
 class RemoteHostConfig(BaseModel):
