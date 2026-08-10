@@ -238,6 +238,8 @@ class FoundationGuard:
         else:
             verdict = VERDICT_SOUND
 
+        from .loyalty import loyalty_report
+
         return {
             "service": "lucy_edge",
             "verdict": verdict,
@@ -250,4 +252,5 @@ class FoundationGuard:
                 "memory and decisions persist locally with provenance",
                 "no capability is claimed unless the running system proves it",
             ],
+            "loyalty": loyalty_report(),
         }
