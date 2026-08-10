@@ -246,5 +246,199 @@ class PhonePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason_code, ReasonCode.LOCAL_INFERENCE_DISABLED)
 
 
+class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for the ARM fail-closed local-inference guard."""
+
+    async def test_arm_guard_blocks_local_inference_by_default(self):
+        """On an ARM host, even with phone_local_inference_enabled=true,
+        local inference is denied unless local_inference_unlocked=true."""
+        from lucy_edge.routing.policy import _is_arm_host
+
+        if not _is_arm_host():
+            self.skipTest("Not on ARM host; guard not active")
+        config = make_config(
+            temp_dir(),
+            phone_local_inference=True,
+            phone_local_inference_unlocked=False,
+        )
+        # Point URL at a remote host so this test exercises the general ARM
+        # guard (target_host=None) rather than the localhost-URL sub-case.
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        services = build_services(config)
+        result = await services.router.route(
+            _request(model="qwen3:1.7b", resources=_cool_snapshot())
+        )
+        self.assertEqual(result.decision, RoutingDecision.DENY)
+        self.assertEqual(result.reason_code, ReasonCode.ARM_LOCAL_INFERENCE_LOCKED)
+
+    async def test_arm_guard_both_flags_required(self):
+        """Both phone_local_inference_enabled AND local_inference_unlocked
+        must be true for local inference on ARM."""
+        from lucy_edge.routing.policy import _is_arm_host
+
+        if not _is_arm_host():
+            self.skipTest("Not on ARM host; guard not active")
+        config = make_config(temp_dir(), phone_local_inference=True)
+        config.phone.local_inference_unlocked = True
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        services = build_services(config, transport=transport)
+        result = await services.router.route(
+            _request(model="qwen3:1.7b", resources=_cool_snapshot())
+        )
+        self.assertEqual(result.decision, RoutingDecision.ALLOW)
+
+    async def test_arm_guard_does_not_block_remote_routing(self):
+        """Routing to a remote host is NOT blocked by the ARM guard,
+        even when local_inference_unlocked is false. This is the intended
+        way to use a phone with a laptop's Ollama."""
+        config = make_config(
+            temp_dir(),
+            phone_local_inference=True,
+            phone_local_inference_unlocked=False,
+        )
+        # Point Ollama at a remote host (the Windows laptop), not loopback.
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        services = build_services(config, transport=transport)
+        services.hosts.register(
+            HostState(
+                host_id="laptop-01",
+                role=HostRole.LAPTOP,
+                status=HostStatus.REGISTERED,
+                provider="ollama",
+            )
+        )
+        result = await services.router.route(
+            _request(target="laptop-01")
+        )
+        self.assertEqual(result.decision, RoutingDecision.ROUTE)
+        self.assertEqual(result.reason_code, ReasonCode.REMOTE_HOST_SELECTED)
+        self.assertEqual(result.target_host, "laptop-01")
+
+    async def test_non_arm_host_not_affected_by_guard(self):
+        """On non-ARM hosts, the guard is a no-op (no ARM denial)."""
+        from lucy_edge.routing.policy import _is_arm_host
+
+        if _is_arm_host():
+            self.skipTest("On ARM host; cannot test non-ARM path here")
+        config = make_config(temp_dir(), phone_local_inference=True)
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        services = build_services(config, transport=transport)
+        result = await services.router.route(
+            _request(model="qwen3:1.7b", resources=_cool_snapshot())
+        )
+        self.assertEqual(result.decision, RoutingDecision.ALLOW)
+
+    async def test_is_arm_host_detects_aarch64(self):
+        """The _is_arm_host helper recognizes ARM architecture strings."""
+        from lucy_edge.routing.policy import _is_arm_host
+        import platform
+
+        machine = platform.machine().lower()
+        if machine.startswith(("arm", "aarch")):
+            self.assertTrue(_is_arm_host())
+        else:
+            self.assertFalse(_is_arm_host())
+
+    async def test_is_localhost_url(self):
+        """_is_localhost_url recognizes loopback addresses."""
+        from lucy_edge.routing.policy import _is_localhost_url
+
+        self.assertTrue(_is_localhost_url("http://127.0.0.1:11434"))
+        self.assertTrue(_is_localhost_url("http://localhost:11434"))
+        self.assertTrue(_is_localhost_url("http://[::1]:11434"))
+        self.assertTrue(_is_localhost_url("127.0.0.1:11434"))
+        self.assertFalse(_is_localhost_url("http://10.202.5.66:11434"))
+        self.assertFalse(_is_localhost_url("http://192.168.1.42:11434"))
+        self.assertFalse(_is_localhost_url("http://laptop-01:11434"))
+
+    async def test_arm_localhost_url_guard_blocks_loopback(self):
+        """On ARM, if Ollama URL is localhost, inference is denied
+        (unless unlocked) — even with phone_local_inference_enabled=true."""
+        from lucy_edge.routing.policy import _is_arm_host, _is_localhost_url
+
+        if not _is_arm_host():
+            self.skipTest("Not on ARM host; guard not active")
+        config = make_config(
+            temp_dir(),
+            phone_local_inference=True,
+            phone_local_inference_unlocked=False,
+        )
+        # Default ollama_base_url is http://127.0.0.1:11434 (localhost)
+        self.assertTrue(_is_localhost_url(config.providers.ollama_base_url))
+        services = build_services(config)
+        result = await services.router.route(
+            _request(model="qwen3:1.7b", resources=_cool_snapshot())
+        )
+        self.assertEqual(result.decision, RoutingDecision.DENY)
+        self.assertEqual(
+            result.reason_code, ReasonCode.ARM_LOCALHOST_INFERENCE_LOCKED
+        )
+
+    async def test_arm_localhost_guard_bypassed_for_remote_url(self):
+        """On ARM, if Ollama URL points to a remote host, the localhost
+        guard does NOT block (the existing ARM/target_host guard may still
+        apply, but the localhost-specific reason must not fire)."""
+        from lucy_edge.routing.policy import _is_arm_host
+
+        config = make_config(
+            temp_dir(),
+            phone_local_inference=True,
+            phone_local_inference_unlocked=False,
+        )
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        services = build_services(config)
+        # Route to a registered remote host — should succeed (not blocked by
+        # localhost guard since URL is remote).
+        services.hosts.register(
+            HostState(
+                host_id="laptop-01",
+                role=HostRole.LAPTOP,
+                status=HostStatus.REGISTERED,
+                provider="ollama",
+            )
+        )
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        # Rebuild with transport for provider health check
+        services = build_services(config, transport=transport)
+        services.hosts.register(
+            HostState(
+                host_id="laptop-01",
+                role=HostRole.LAPTOP,
+                status=HostStatus.REGISTERED,
+                provider="ollama",
+            )
+        )
+        result = await services.router.route(_request(target="laptop-01"))
+        self.assertEqual(result.decision, RoutingDecision.ROUTE)
+        self.assertEqual(result.reason_code, ReasonCode.REMOTE_HOST_SELECTED)
+
+    async def test_arm_localhost_guard_unlocked_with_override(self):
+        """On ARM with localhost URL but unlocked + enabled, the guard
+        is bypassed (dev override)."""
+        from lucy_edge.routing.policy import _is_arm_host
+
+        if not _is_arm_host():
+            self.skipTest("Not on ARM host; guard not active")
+        config = make_config(
+            temp_dir(),
+            phone_local_inference=True,
+            phone_local_inference_unlocked=True,
+        )
+        # Default URL is localhost
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        services = build_services(config, transport=transport)
+        result = await services.router.route(
+            _request(model="qwen3:1.7b", resources=_cool_snapshot())
+        )
+        # Unlocked + enabled + cool + healthy → ALLOW (localhost guard bypassed)
+        self.assertEqual(result.decision, RoutingDecision.ALLOW)
+
+
 if __name__ == "__main__":
     unittest.main()

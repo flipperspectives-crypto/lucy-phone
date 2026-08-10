@@ -50,9 +50,18 @@ def make_config(
     host_role: str = "PHONE",
     host_id: str = "test-host",
     phone_local_inference: bool = False,
+    phone_local_inference_unlocked: bool | None = None,
 ) -> LucyEdgeConfig:
     config = LucyEdgeConfig(base_dir=tmp, host_role=host_role, host_id=host_id)
     config.phone.phone_local_inference_enabled = phone_local_inference
+    # Default unlocked to match enabled so routing-logic tests focus on
+    # routing, not the ARM guard. ARM-guard tests pass unlocked=False
+    # explicitly to exercise the fail-closed path.
+    config.phone.local_inference_unlocked = (
+        phone_local_inference
+        if phone_local_inference_unlocked is None
+        else phone_local_inference_unlocked
+    )
     config.memory.db_path = f"{tmp}/memory.db"
     config.evidence.dir_path = f"{tmp}/evidence"
     config.evidence.ledger_db = f"{tmp}/evidence.db"

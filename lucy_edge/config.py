@@ -5,9 +5,12 @@ Environment variables follow the NEXUS_* conventions:
 
     NEXUS_LUCY_GATEWAY_HOST
     NEXUS_LUCY_GATEWAY_PORT
-    NEXUS_OLLAMA_HOST
+    NEXUS_OLLAMA_URL       (full Ollama base URL, e.g. http://192.168.1.42:11434)
+    NEXUS_OLLAMA_HOST      (legacy host-only override)
     NEXUS_HOST_ROLE        (PHONE | LAPTOP | RTX4060 | UNKNOWN)
     NEXUS_HOST_ID
+    NEXUS_PHONE_LOCAL_INFERENCE_ENABLED
+    NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED
     NEXUS_SESSION_TOKEN    (auth token; overrides data/operator.token file)
 """
 
@@ -46,10 +49,23 @@ class PhonePolicy(BaseModel):
     but ONLY behind the routing gates: model class <= local_inference_max_class
     (7B-class is never local on a phone), verified thermal telemetry passing
     the governor, and enough free RAM for the model class.
+
+    ARM / Android fail-closed guard
+    -------------------------------
+    On ARM hosts (aarch64/arm64 — phones, tablets, SBCs), local inference is
+    BLOCKED regardless of ``phone_local_inference_enabled`` unless the operator
+    explicitly sets ``local_inference_unlocked = True``.  This is fail-closed:
+    the safe default is "do not run a local LLM on this phone".  Accidentally
+    enabling local inference on a phone can hit thermal limits and drain the
+    battery.  To intentionally run local inference on an ARM host, set BOTH
+    ``phone_local_inference_enabled = True`` AND
+    ``local_inference_unlocked = True`` (or the
+    ``NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED`` env var).
     """
 
     phone_local_inference_enabled: bool = False
     local_inference_max_class: str = "SMALL"  # MICRO | SMALL; never LUCY_7B_CLASS
+    local_inference_unlocked: bool = False  # ARM fail-closed override
 
 
 class GatewayConfig(BaseModel):
@@ -207,8 +223,17 @@ _ENV_OVERRIDES: dict[str, tuple[str, Any]] = {
     "NEXUS_HOST_ROLE": ("host_role", str),
     "NEXUS_LUCY_GATEWAY_HOST": ("gateway.host", str),
     "NEXUS_LUCY_GATEWAY_PORT": ("gateway.port", int),
+    # NEXUS_OLLAMA_URL sets the full Ollama base URL (scheme + host + port).
+    # Use this to point Lucy at a remote Ollama on your Windows laptop, e.g.:
+    #   NEXUS_OLLAMA_URL=http://192.168.1.42:11434
+    # NEXUS_OLLAMA_HOST is the legacy host-only override (kept for compat).
+    "NEXUS_OLLAMA_URL": ("providers.ollama_base_url", str),
     "NEXUS_OLLAMA_HOST": ("providers.ollama_base_url", str),
     "NEXUS_PHONE_LOCAL_INFERENCE_ENABLED": ("phone.phone_local_inference_enabled", bool),
+    # NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED unlocks the ARM fail-closed guard.
+    # Required (with PHONE_LOCAL_INFERENCE_ENABLED) to run local inference on
+    # ARM hosts.  Intentionally separate so the two flags must both be set.
+    "NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED": ("phone.local_inference_unlocked", bool),
 }
 
 
