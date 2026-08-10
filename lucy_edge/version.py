@@ -1,0 +1,5 @@
+"""Version metadata for NEXUS LUCY EDGE."""
+
+__version__ = "0.1.0"
+BUILD_PHASE = "PHONE-SAFE DEVELOPMENT PHASE"
+READINESS = "NOT PRODUCTION-READY"

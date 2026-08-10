@@ -1,0 +1,30 @@
+# nexus_lucy_bridge configuration template.
+# Copy to bridge.yaml and adjust for your Lucy + Nexus endpoints.
+# All values can be overridden with environment variables (see README).
+
+bridge:
+  host: 127.0.0.1          # bind address for the bridge HTTP server
+  port: 8765               # listen port (Lucy posts status here)
+  log_level: INFO          # DEBUG | INFO | WARNING | ERROR
+  log_dir: logs            # rotating log location (created on startup)
+  log_file: bridge.log
+  queue_db: data/queue.db  # SQLite outbox/inbox file (created on startup)
+  flush_interval: 5        # seconds between queue-flush attempts
+  reconnect_interval: 10   # base seconds between Nexus reconnect attempts
+  heartbeat_interval: 0    # bridge->Nexus heartbeat seconds; 0 disables
+
+nexus:
+  base_url: http://127.0.0.1:8080
+  status_path: /api/v1/node/status
+  sse_path: /sse
+  api_key: ""              # optional Bearer token for Nexus auth
+  listener: auto           # auto | sse | ws  (ws requires websockets pkg)
+  fallback_after_failures: 3  # failed SSE connects before trying ws (auto)
+  timeout: 10              # outbound HTTP timeout seconds
+
+lucy:
+  node_id: lucy-node-01    # identity reported to Nexus
+  status_path: /v1/lucy/status   # bridge endpoint Lucy POSTs status to
+  command_endpoint: http://127.0.0.1:9700/v1/dispatch  # where Lucy receives commands
+  timeout: 5               # outbound command delivery timeout seconds
+  stale_after: 60          # Lucy marked stale if no status for N seconds

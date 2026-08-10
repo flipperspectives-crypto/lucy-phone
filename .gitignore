@@ -1,0 +1,15 @@
+# Runtime data (memory DBs, evidence, tokens) - never commit
+data/
+*.token
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python artifacts
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Logs
+logs/
