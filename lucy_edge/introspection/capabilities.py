@@ -25,6 +25,7 @@ class CapabilityIntrospection:
         agent_limits: Any,
         policy: Any,
         planner: Any = None,
+        mcp_registry: Any = None,
     ) -> None:
         self.config = config
         self.providers = providers
@@ -36,6 +37,7 @@ class CapabilityIntrospection:
         self.agent_limits = agent_limits
         self.policy = policy
         self.planner = planner
+        self.mcp_registry = mcp_registry
 
     async def capabilities_report(self) -> dict[str, Any]:
         memory_count = (
@@ -160,7 +162,7 @@ class CapabilityIntrospection:
                 "record_count": evidence_count,
                 "storage": "sqlite+json-atomic" if self.evidence is not None else None,
             },
-            "mcp": {"available": False, "note": "MCP is not installed or configured in phase 1"},
+            "mcp": self._mcp_report(),
         }
 
     def retrieval_configured(self) -> bool:
@@ -173,6 +175,28 @@ class CapabilityIntrospection:
 
     def _planner_is_model_driven(self) -> bool:
         return self._planner_backend() == "MODEL_DRIVEN"
+
+    def _mcp_report(self) -> dict[str, Any]:
+        if self.mcp_registry is None or not self.mcp_registry.enabled:
+            return {
+                "available": False,
+                "enabled": False,
+                "servers_configured": 0,
+                "servers_online": 0,
+                "tools_discovered": 0,
+                "note": "MCP is not enabled",
+            }
+        tools = self.mcp_registry.all_tools()
+        reports = self.mcp_registry._reports
+        online = sum(1 for r in reports.values() if r.ok)
+        return {
+            "available": self.mcp_registry.available,
+            "enabled": True,
+            "servers_configured": len(self.mcp_registry.server_ids()),
+            "servers_online": online,
+            "tools_discovered": len(tools),
+            "tool_names": [t.qualified_name for t in tools],
+        }
 
     async def runtime_report(self) -> dict[str, Any]:
         return await self.capabilities_report()

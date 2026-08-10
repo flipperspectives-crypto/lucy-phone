@@ -130,6 +130,37 @@ class PhoneClientConfig(BaseModel):
     token_file: str = "data/operator.token"
 
 
+class MCPServerConfig(BaseModel):
+    """Allowlisted MCP server (mirrors lucy_edge.mcp.MCPServerConfig).
+
+    Declared here so it can be loaded from YAML/env.  The lucy_edge.mcp module
+    re-validates on construction.
+    """
+
+    server_id: str
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    allowed_tools: list[str] = Field(default_factory=list)
+    denied_tools: list[str] = Field(default_factory=list)
+    connect_timeout: float = 5.0
+    call_timeout: float = 10.0
+    enabled: bool = True
+    permission_class: str = "mcp"
+
+
+class MCPConfig(BaseModel):
+    enabled: bool = False
+    servers: list[MCPServerConfig] = Field(default_factory=list)
+    max_servers: int = 8
+    max_tools_per_server: int = 32
+    global_denied_tools: list[str] = Field(default_factory=list)
+    fail_fast: bool = False
+
+
 class FoundationConfig(BaseModel):
     """The new-foundation contract.
 
@@ -161,6 +192,7 @@ class LucyEdgeConfig(BaseModel):
     remote_hosts: list[RemoteHostConfig] = Field(default_factory=list)
     introspection: IntrospectionConfig = Field(default_factory=IntrospectionConfig)
     phone_client: PhoneClientConfig = Field(default_factory=PhoneClientConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     foundation: FoundationConfig = Field(default_factory=FoundationConfig)
 
     def resolve(self, path: str) -> str:

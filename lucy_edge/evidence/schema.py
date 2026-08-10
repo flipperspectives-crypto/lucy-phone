@@ -27,6 +27,8 @@ class EvidenceType(str, Enum):
     MEMORY_EVENT = "MEMORY_EVENT"
     INTROSPECTION = "INTROSPECTION"
     BUILD = "BUILD"
+    MCP_EVENT = "MCP_EVENT"
+    MCP_CALL = "MCP_CALL"
 
 
 def canonical_json(data: dict[str, Any]) -> str:

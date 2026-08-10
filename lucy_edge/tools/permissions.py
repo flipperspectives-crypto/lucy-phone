@@ -173,6 +173,15 @@ class PermissionPolicy:
                 "memory proposals are non-durable by construction",
             )
 
+        # MCP tools default to ASK (operator approval) unless explicitly
+        # allowlisted.  They come from external servers and must not run
+        # unattended.
+        if name.startswith("mcp."):
+            return PermissionDecision(
+                PermissionOutcome.ASK,
+                "MCP tool requires operator approval",
+            )
+
         # Anything unclassified: require approval.
         return PermissionDecision(PermissionOutcome.ASK, "unclassified tool requires approval")
 

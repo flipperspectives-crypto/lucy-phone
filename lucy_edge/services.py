@@ -14,7 +14,7 @@ from .agent.limits import AgentLimits, limits_from_config
 from .agent.planner import ModelDrivenPlanner, RulePlanner
 from .agent.planner_provider import MockPlannerProvider, ModelPlannerProvider
 from .agent.runtime import AgentRuntime
-from .config import LucyEdgeConfig
+from .config import LucyEdgeConfig, MCPConfig, MCPServerConfig
 from .evidence.ledger import EvidenceLedger
 from .evidence.schema import EvidenceRecord, EvidenceType
 from .foundation.audit import FoundationGuard
@@ -25,6 +25,7 @@ from .hardware.governor import ThermalGovernor
 from .hardware.sensors import build_telemetry
 from .introspection.capabilities import CapabilityIntrospection
 from .introspection.runtime_report import LucyIntrospection
+from .mcp import MCPAudit, MCPAllowlist, MCPRegistry
 from .memory.admission import MemoryAdmission
 from .memory.retrieval import RetrievalEngine
 from .memory.store import MemoryStore
@@ -35,7 +36,7 @@ from .routing.policy import RoutingPolicy, RoutingRequest, RoutingResult
 from .tools.builtin.core import register_builtin_tools
 from .tools.context import ToolContext
 from .tools.permissions import PermissionPolicy, build_phone_policy
-from .tools.registry import ToolRegistry
+from .tools.registry import ToolRegistry, ToolSpec
 
 
 @dataclass
@@ -60,6 +61,7 @@ class LucyEdgeServices:
     planner: Any
     auth: AuthService
     rate_limiter: RateLimiter
+    mcp_registry: Optional[MCPRegistry] = None
     foundation: Optional["FoundationGuard"] = None
     grounding: Optional["LocalGrounding"] = None
     workspace: str = "."
@@ -72,16 +74,45 @@ class LucyEdgeServices:
             await self.memory.open()
         if self.evidence is not None:
             await self.evidence.open()
+        if self.mcp_registry is not None and self.mcp_registry.enabled:
+            await self.mcp_registry.open()
+            self._register_mcp_tools()
         self._open = True
 
     async def close(self) -> None:
         if not self._open:
             return
+        if self.mcp_registry is not None:
+            await self.mcp_registry.close()
         if self.memory is not None:
             await self.memory.close()
         if self.evidence is not None:
             await self.evidence.close()
         self._open = False
+
+    def _register_mcp_tools(self) -> None:
+        """Register discovered MCP tools into the host tool registry.
+
+        MCP tools are registered as ``mcp.<server_id>.<tool>`` so they flow
+        through the normal permission and evidence path.  Registration is
+        idempotent per open() and never raises.
+        """
+        if self.mcp_registry is None or self.tools is None:
+            return
+        from .mcp import make_mcp_tool_func
+
+        for tool in self.mcp_registry.all_tools():
+            func = make_mcp_tool_func(self.mcp_registry, tool.server_id, tool)
+            spec = ToolSpec(
+                name=tool.qualified_name,
+                description=f"[MCP {tool.server_id}] {tool.description}",
+                func=func,
+                permission_class=tool.permission_class,
+            )
+            try:
+                self.tools.register(spec)
+            except ValueError:
+                pass
 
     def new_agent_run(self, goal: str, limits: Optional[AgentLimits] = None) -> AgentRuntime:
         return AgentRuntime(
@@ -182,6 +213,14 @@ def build_services(
     else:
         planner = RulePlanner(agent_limits)
 
+    # Build the MCP registry from the explicit allowlist.  On a phone this is
+    # inert unless the operator explicitly enables MCP AND configures servers.
+    mcp_audit = MCPAudit(evidence)
+    mcp_allowlist = MCPAllowlist(_mcp_config_from_config(config))
+    mcp_registry = MCPRegistry(
+        _mcp_config_from_config(config), allowlist=mcp_allowlist, audit=mcp_audit
+    )
+
     capabilities = CapabilityIntrospection(
         config=config,
         providers=providers,
@@ -193,6 +232,7 @@ def build_services(
         agent_limits=agent_limits,
         policy=policy,
         planner=planner,
+        mcp_registry=mcp_registry,
     )
     introspection = LucyIntrospection(capabilities, config)
     context.introspection = introspection
@@ -230,6 +270,44 @@ def build_services(
         rate_limiter=rate_limiter,
         workspace=workspace,
     )
+    services.mcp_registry = mcp_registry
     services.foundation = FoundationGuard(services)
     services.grounding = LocalGrounding(retrieval, evidence)
     return services
+
+
+def _mcp_config_from_config(config: LucyEdgeConfig) -> MCPConfig:
+    """Translate the YAML-level MCPConfig into the runtime MCPConfig."""
+    from .mcp import MCPConfig as _RuntimeMCPConfig
+    from .mcp import MCPServerConfig as _RuntimeServerConfig
+
+    servers = []
+    for s in config.mcp.servers:
+        rc = _RuntimeServerConfig(
+            server_id=s.server_id,
+            transport=s.transport,
+            command=s.command,
+            args=list(s.args),
+            env=dict(s.env),
+            url=s.url,
+            headers=dict(s.headers),
+            allowed_tools=list(s.allowed_tools),
+            denied_tools=list(s.denied_tools),
+            connect_timeout=s.connect_timeout,
+            call_timeout=s.call_timeout,
+            enabled=s.enabled,
+            permission_class=s.permission_class,
+        )
+        # Carry through an injected transport (tests wire FakeMCPTransport).
+        injected = getattr(s, "_transport", None)
+        if injected is not None:
+            rc._transport = injected
+        servers.append(rc)
+    return _RuntimeMCPConfig(
+        enabled=config.mcp.enabled,
+        servers=servers,
+        max_servers=config.mcp.max_servers,
+        max_tools_per_server=config.mcp.max_tools_per_server,
+        global_denied_tools=list(config.mcp.global_denied_tools),
+        fail_fast=config.mcp.fail_fast,
+    )
