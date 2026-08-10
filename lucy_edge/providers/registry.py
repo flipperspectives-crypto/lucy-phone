@@ -72,7 +72,10 @@ def build_default_registry(
     if transport is not None or config.providers.ollama_base_url:
         registry.register(
             OllamaProvider(
-                base_url=config.providers.ollama_base_url, transport=transport
+                base_url=config.providers.ollama_base_url,
+                transport=transport,
+                request_timeout=config.providers.request_timeout,
+                connect_timeout=config.providers.connect_timeout,
             )
         )
     return registry

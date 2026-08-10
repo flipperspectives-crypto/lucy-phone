@@ -79,7 +79,15 @@ class GatewayConfig(BaseModel):
 class ProviderConfig(BaseModel):
     default_provider: str = "mock"
     ollama_base_url: str = DEFAULT_OLLAMA_HOST
-    request_timeout: float = 30.0
+    # Total time budget for a single inference response.  120s is appropriate
+    # for remote Ollama (e.g. a Windows laptop) where cold model loads and
+    # large context can exceed 30s.  Connection establishment is governed
+    # separately by connect_timeout (fail-fast).
+    request_timeout: float = 120.0
+    # Fail-fast ceiling for establishing the TCP/TLS connection to the
+    # Ollama HTTP endpoint.  Kept short so an unreachable host fails quickly
+    # without waiting the full request_timeout.
+    connect_timeout: float = 5.0
     stream_chunk_timeout: float = 5.0
 
 
@@ -225,10 +233,14 @@ _ENV_OVERRIDES: dict[str, tuple[str, Any]] = {
     "NEXUS_LUCY_GATEWAY_PORT": ("gateway.port", int),
     # NEXUS_OLLAMA_URL sets the full Ollama base URL (scheme + host + port).
     # Use this to point Lucy at a remote Ollama on your Windows laptop, e.g.:
-    #   NEXUS_OLLAMA_URL=http://192.168.1.42:11434
+    #   NEXUS_OLLAMA_URL=http://10.202.5.66:11434
     # NEXUS_OLLAMA_HOST is the legacy host-only override (kept for compat).
     "NEXUS_OLLAMA_URL": ("providers.ollama_base_url", str),
     "NEXUS_OLLAMA_HOST": ("providers.ollama_base_url", str),
+    # NEXUS_OLLAMA_REQUEST_TIMEOUT sets the per-response budget (default 120s).
+    "NEXUS_OLLAMA_REQUEST_TIMEOUT": ("providers.request_timeout", float),
+    # NEXUS_OLLAMA_CONNECT_TIMEOUT sets the fail-fast connect ceiling (default 5s).
+    "NEXUS_OLLAMA_CONNECT_TIMEOUT": ("providers.connect_timeout", float),
     "NEXUS_PHONE_LOCAL_INFERENCE_ENABLED": ("phone.phone_local_inference_enabled", bool),
     # NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED unlocks the ARM fail-closed guard.
     # Required (with PHONE_LOCAL_INFERENCE_ENABLED) to run local inference on

@@ -36,19 +36,32 @@ from .base import (
 
 
 class AiohttpTransport:
-    """Real HTTP transport using aiohttp (used on the laptop later)."""
+    """Real HTTP transport using aiohttp.
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    ``total`` is the full time budget for a response (inference can be slow,
+    especially on a remote host or during a cold model load).  ``connect`` is
+    the fail-fast ceiling for establishing the TCP/TLS connection — an
+    unreachable host fails quickly without eating into the response budget.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 120.0,
+        connect_timeout: float = 5.0,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.connect_timeout = connect_timeout
 
     async def request(self, method: str, path: str, payload: Optional[dict] = None) -> Any:
         import aiohttp
 
         url = f"{self.base_url}{path}"
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.timeout)
-        ) as session:
+        client_timeout = aiohttp.ClientTimeout(
+            connect=self.connect_timeout, total=self.timeout
+        )
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
             if method == "GET":
                 async with session.get(url) as resp:
                     body = await resp.text()
@@ -78,9 +91,17 @@ class OllamaProvider(BaseProvider):
     name = "ollama"
     kind = "ollama"
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434", transport: Any = None) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11434",
+        transport: Any = None,
+        request_timeout: float = 120.0,
+        connect_timeout: float = 5.0,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._transport = transport or AiohttpTransport(self.base_url)
+        self._transport = transport or AiohttpTransport(
+            self.base_url, timeout=request_timeout, connect_timeout=connect_timeout
+        )
         self._version: Optional[str] = None
 
     def capabilities(self) -> set[Capability]:

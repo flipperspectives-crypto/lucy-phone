@@ -170,6 +170,77 @@ class OllamaProviderClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(metrics.simulated)
 
 
+class OllamaTimeoutTests(unittest.TestCase):
+    """The Ollama provider timeout is configurable and fail-fast on connect."""
+
+    def test_default_request_timeout_is_120s(self):
+        from lucy_edge.providers.ollama import AiohttpTransport
+
+        transport = AiohttpTransport(base_url="http://host:11434")
+        self.assertEqual(transport.timeout, 120.0)
+
+    def test_default_connect_timeout_is_5s(self):
+        from lucy_edge.providers.ollama import AiohttpTransport
+
+        transport = AiohttpTransport(base_url="http://host:11434")
+        self.assertEqual(transport.connect_timeout, 5.0)
+
+    def test_timeout_passed_through_to_transport(self):
+        from lucy_edge.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            base_url="http://host:11434",
+            request_timeout=90.0,
+            connect_timeout=3.0,
+        )
+        self.assertEqual(provider._transport.timeout, 90.0)
+        self.assertEqual(provider._transport.connect_timeout, 3.0)
+
+    def test_provider_config_defaults(self):
+        from lucy_edge.config import ProviderConfig
+
+        cfg = ProviderConfig()
+        self.assertEqual(cfg.request_timeout, 120.0)
+        self.assertEqual(cfg.connect_timeout, 5.0)
+
+    def test_env_var_overrides_timeout(self):
+        import importlib
+        import os
+
+        from lucy_edge import config as config_mod
+
+        os.environ["NEXUS_OLLAMA_REQUEST_TIMEOUT"] = "150"
+        os.environ["NEXUS_OLLAMA_CONNECT_TIMEOUT"] = "7"
+        try:
+            importlib.reload(config_mod)
+            cfg = config_mod.ProviderConfig()
+            # Env overrides apply at load_config time, not on the model itself,
+            # so verify the override mapping exists and casts correctly.
+            self.assertIn("NEXUS_OLLAMA_REQUEST_TIMEOUT", config_mod._ENV_OVERRIDES)
+            self.assertIn("NEXUS_OLLAMA_CONNECT_TIMEOUT", config_mod._ENV_OVERRIDES)
+            path, ty = config_mod._ENV_OVERRIDES["NEXUS_OLLAMA_REQUEST_TIMEOUT"]
+            self.assertEqual(path, "providers.request_timeout")
+            self.assertEqual(ty, float)
+        finally:
+            del os.environ["NEXUS_OLLAMA_REQUEST_TIMEOUT"]
+            del os.environ["NEXUS_OLLAMA_CONNECT_TIMEOUT"]
+            importlib.reload(config_mod)
+
+    def test_load_config_applies_timeout_env(self):
+        import os
+        from lucy_edge.config import load_config
+
+        os.environ["NEXUS_OLLAMA_REQUEST_TIMEOUT"] = "200"
+        os.environ["NEXUS_OLLAMA_CONNECT_TIMEOUT"] = "10"
+        try:
+            cfg = load_config()
+            self.assertEqual(cfg.providers.request_timeout, 200.0)
+            self.assertEqual(cfg.providers.connect_timeout, 10.0)
+        finally:
+            del os.environ["NEXUS_OLLAMA_REQUEST_TIMEOUT"]
+            del os.environ["NEXUS_OLLAMA_CONNECT_TIMEOUT"]
+
+
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_register_get_names(self):
         registry = ProviderRegistry()
@@ -194,6 +265,20 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         registry = ProviderRegistry()
         with self.assertRaises(ProviderError):
             registry.require("missing")
+
+    async def test_registry_passes_config_timeouts_to_provider(self):
+        from lucy_edge.config import LucyEdgeConfig
+        from lucy_edge.providers.registry import build_default_registry
+
+        config = LucyEdgeConfig()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.providers.request_timeout = 90.0
+        config.providers.connect_timeout = 3.0
+        registry = build_default_registry(config)
+        ollama = registry.get("ollama")
+        self.assertIsNotNone(ollama)
+        self.assertEqual(ollama._transport.timeout, 90.0)
+        self.assertEqual(ollama._transport.connect_timeout, 3.0)
 
 
 if __name__ == "__main__":
