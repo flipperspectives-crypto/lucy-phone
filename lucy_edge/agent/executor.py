@@ -51,6 +51,9 @@ class Executor:
         if step.action == "retrieve_memory":
             tool_result = await self.registry.execute(step.tool, step.args, context)
             return self._from_tool(step, tool_result)
+        if step.action == "record_evidence":
+            tool_result = await self.registry.execute(step.tool, step.args, context)
+            return self._from_tool(step, tool_result)
         if step.action == "execute":
             t0 = time.monotonic()
             try:

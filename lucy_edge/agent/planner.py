@@ -63,7 +63,12 @@ class RulePlanner:
     def __init__(self, limits: AgentLimits) -> None:
         self.limits = limits
 
-    def build_plan(self, goal: str, available_tools: list[str]) -> Plan:
+    def build_plan(
+        self,
+        goal: str,
+        available_tools: list[str],
+        tool_schemas: Optional[list[dict[str, Any]]] = None,
+    ) -> Plan:
         goal_lower = goal.lower()
         steps: list[PlanStep] = []
         index = 0
@@ -128,9 +133,14 @@ class ModelDrivenPlanner:
         self.provider = provider
         self.fallback = fallback or RulePlanner(limits)
 
-    def build_plan(self, goal: str, available_tools: list[str]) -> Plan:
+    def build_plan(
+        self,
+        goal: str,
+        available_tools: list[str],
+        tool_schemas: Optional[list[dict[str, Any]]] = None,
+    ) -> Plan:
         try:
-            plan = self.provider.generate_plan(goal, available_tools, self.limits)
+            plan = self.provider.generate_plan(goal, available_tools, self.limits, tool_schemas)
         except Exception:
             return self.fallback.build_plan(goal, available_tools)
 

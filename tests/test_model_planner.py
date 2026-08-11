@@ -178,5 +178,103 @@ class AgentRuntimeWithModelPlannerTests(unittest.IsolatedAsyncioTestCase):
             await services.close()
 
 
+class MCPAwarePlanningTests(unittest.TestCase):
+    """Prove the model-driven planner can select MCP tools when given schemas,
+    while the RulePlanner behavior is unchanged."""
+
+    def _mcp_schemas(self) -> list[dict]:
+        return [
+            {
+                "name": "mcp.fs-test.read_file",
+                "description": "Read a file inside the allowed test directory.",
+                "permission_class": "read",
+                "owner": "lucy_edge",
+            },
+            {
+                "name": "mcp.fs-test.list_directory",
+                "description": "List entries inside a directory in the allowed test directory.",
+                "permission_class": "read",
+                "owner": "lucy_edge",
+            },
+        ]
+
+    def test_mock_provider_selects_mcp_tool_with_schema(self):
+        """When tool schemas are supplied, the MockPlannerProvider should
+        select an MCP tool whose description matches the goal."""
+        provider = MockPlannerProvider()
+        limits = AgentLimits()
+        schemas = self._mcp_schemas()
+        all_tools = ["memory.search", "system.health"] + [s["name"] for s in schemas]
+        plan = provider.generate_plan(
+            "read a file from the test directory", all_tools, limits, schemas
+        )
+        tools_used = [s.tool for s in plan.steps if s.tool]
+        self.assertIn("mcp.fs-test.read_file", tools_used)
+
+    def test_mock_provider_ignores_mcp_without_schema(self):
+        """Without tool schemas, the MockPlannerProvider falls back to its
+        builtin keyword vocabulary and does NOT select MCP tools."""
+        provider = MockPlannerProvider()
+        limits = AgentLimits()
+        schemas = self._mcp_schemas()
+        all_tools = ["memory.search", "system.health", "files.read_scoped"] + [
+            s["name"] for s in schemas
+        ]
+        plan = provider.generate_plan(
+            "read a file from the test directory", all_tools, limits, tool_schemas=None
+        )
+        tools_used = [s.tool for s in plan.steps if s.tool]
+        self.assertNotIn("mcp.fs-test.read_file", tools_used)
+        # Falls back to the builtin "file" keyword match.
+        self.assertIn("files.read_scoped", tools_used)
+
+    def test_model_driven_planner_passes_schemas_to_provider(self):
+        """ModelDrivenPlanner.build_plan forwards tool schemas to its provider."""
+        provider = MockPlannerProvider()
+        planner = ModelDrivenPlanner(AgentLimits(), provider)
+        schemas = self._mcp_schemas()
+        all_tools = ["memory.search"] + [s["name"] for s in schemas]
+        plan = planner.build_plan(
+            "list the test directory contents", all_tools, schemas
+        )
+        tools_used = [s.tool for s in plan.steps if s.tool]
+        self.assertIn("mcp.fs-test.list_directory", tools_used)
+
+    def test_rule_planner_ignores_mcp_tools_and_schemas(self):
+        """RulePlanner behavior is unchanged: it uses only its hardcoded
+        keyword vocabulary and never selects MCP tools, even when schemas
+        are available."""
+        planner = RulePlanner(AgentLimits())
+        schemas = self._mcp_schemas()
+        all_tools = ["memory.search", "files.read_scoped"] + [s["name"] for s in schemas]
+        plan = planner.build_plan("read a file", all_tools)
+        tools_used = [s.tool for s in plan.steps if s.tool]
+        self.assertIn("files.read_scoped", tools_used)
+        self.assertNotIn("mcp.fs-test.read_file", tools_used)
+
+    def test_mcp_tool_matching_is_description_based(self):
+        """The MCP matcher scores by keyword overlap with tool descriptions,
+        not by tool name."""
+        from lucy_edge.agent.planner_provider import _match_mcp_tool
+
+        schemas = self._mcp_schemas()
+        # "list directory" overlaps the list_directory description.
+        match = _match_mcp_tool("list directory contents", schemas)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["tool"], "mcp.fs-test.list_directory")
+
+    def test_mcp_tool_matching_ignores_non_mcp_tools(self):
+        """_match_mcp_tool only considers tools whose name starts with mcp."""
+        from lucy_edge.agent.planner_provider import _match_mcp_tool
+
+        schemas = [
+            {"name": "files.read_scoped", "description": "read a file"},
+            {"name": "mcp.fs-test.read_file", "description": "read a file"},
+        ]
+        match = _match_mcp_tool("read a file", schemas)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["tool"], "mcp.fs-test.read_file")
+
+
 if __name__ == "__main__":
     unittest.main()

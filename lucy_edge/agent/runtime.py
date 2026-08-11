@@ -181,7 +181,11 @@ class AgentRuntime:
         self._started_at = t0
         self._deadline = t0 + self.limits.task_timeout
         self.transition(AgentState.PLANNING)
-        plan = self.planner.build_plan(self.goal, self.registry.names())
+        # Pass tool schemas (names + descriptions) so a model-driven planner
+        # can select MCP tools as well as builtins.
+        plan = self.planner.build_plan(
+            self.goal, self.registry.names(), self.registry.list()
+        )
         if not plan.steps:
             self.transition(AgentState.FAILED)
             return self._finish(t0, AgentState.FAILED, "empty plan")

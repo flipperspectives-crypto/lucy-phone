@@ -39,7 +39,7 @@ def _plan_with(steps: list[PlanStep]) -> RulePlanner:
         def __init__(self):
             super().__init__(AgentLimits())
 
-        def build_plan(self, goal, available_tools):
+        def build_plan(self, goal, available_tools, tool_schemas=None):
             return Plan(goal=goal, steps=steps)
 
     return CustomPlanner()
