@@ -22,7 +22,7 @@ from lucy_edge.agent.planner_provider import (
 from lucy_edge.agent.runtime import AgentRuntime, AgentState
 from lucy_edge.services import build_services
 
-from .helpers import make_config, temp_dir
+from .helpers import FakeTransport, make_config, temp_dir
 
 
 class MockPlannerProviderTests(unittest.TestCase):
@@ -432,6 +432,104 @@ class RemotePlanningRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.steps)
         tools_used = [s.tool for s in plan.steps if s.tool]
         self.assertIn("system.health", tools_used)
+
+
+class RemoteHostProbingTests(unittest.IsolatedAsyncioTestCase):
+    """Prove that _probe_remote_hosts registers only healthy remote hosts."""
+
+    async def test_healthy_remote_host_becomes_registered(self):
+        """A reachable Ollama host is probed and promoted to REGISTERED."""
+        from lucy_edge.config import LucyEdgeConfig, RemoteHostConfig
+        from lucy_edge.routing.hosts import HostStatus
+        from lucy_edge.services import build_services
+
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.32.6"})
+        transport.on("GET", "/api/tags", {"models": []})
+
+        config = LucyEdgeConfig()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.remote_hosts = [
+            RemoteHostConfig(
+                host_id="win-laptop",
+                role="LAPTOP",
+                provider="ollama",
+                base_url="http://10.202.5.66:11434",
+            )
+        ]
+
+        services = build_services(config, transport=transport)
+        await services.open()
+        try:
+            host = services.hosts.get("win-laptop")
+            self.assertIsNotNone(host)
+            self.assertEqual(host.status, HostStatus.REGISTERED)
+            self.assertTrue(host.is_usable)
+        finally:
+            await services.close()
+
+    async def test_unreachable_host_remains_unknown(self):
+        """An unreachable Ollama host is left UNKNOWN (not trusted)."""
+        from lucy_edge.config import LucyEdgeConfig, RemoteHostConfig
+        from lucy_edge.routing.hosts import HostStatus
+        from lucy_edge.services import build_services
+
+        transport = FakeTransport(fail_with=Exception("connection refused"))
+
+        config = LucyEdgeConfig()
+        config.providers.ollama_base_url = "http://192.168.99.99:11434"
+        config.remote_hosts = [
+            RemoteHostConfig(
+                host_id="dead-host",
+                role="LAPTOP",
+                provider="ollama",
+                base_url="http://192.168.99.99:11434",
+            )
+        ]
+
+        services = build_services(config, transport=transport)
+        await services.open()
+        try:
+            host = services.hosts.get("dead-host")
+            self.assertIsNotNone(host)
+            self.assertEqual(host.status, HostStatus.UNKNOWN)
+            self.assertFalse(host.is_usable)
+        finally:
+            await services.close()
+
+    async def test_probed_host_planner_routes_to_laptop(self):
+        """After probing registers the host, the planner's routing request
+        includes target_host=win-laptop and the router routes to it."""
+        from unittest.mock import MagicMock
+
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+        from lucy_edge.config import RemoteHostConfig
+        from lucy_edge.routing.policy import RoutingDecision
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.providers.default_provider = "ollama"
+        config.routing.default_model = "qwen3:1.7b"
+        config.host_role = "PHONE"
+        config.host_id = "phone-1"
+        config.remote_hosts = [
+            RemoteHostConfig(
+                host_id="win-laptop",
+                role="LAPTOP",
+                provider="ollama",
+                base_url="http://10.202.5.66:11434",
+            )
+        ]
+
+        router = MagicMock()
+        router.route = AsyncMock(
+            return_value=MagicMock(decision=RoutingDecision.ROUTE)
+        )
+        provider = ModelPlannerProvider(config, router, MagicMock())
+
+        provider.generate_plan("read a file", ["memory.search"], AgentLimits())
+        request_arg = router.route.call_args[0][0]
+        self.assertEqual(request_arg.target_host, "win-laptop")
 
 
 if __name__ == "__main__":
