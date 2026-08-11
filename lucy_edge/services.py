@@ -201,14 +201,15 @@ def build_services(
     agent_limits = limits_from_config(config)
 
     # Build the agent planner.  Phone-safe default is the rule-based planner.
-    # When planner_backend == "model", use ModelDrivenPlanner: on a phone the
-    # ModelProvider routes through ModelRouter (which denies local inference
-    # and falls back to the deterministic MockProvider), so no real model runs.
+    # When planner_backend == "model", use ModelDrivenPlanner with the
+    # ModelPlannerProvider.  The provider routes through ModelRouter: when the
+    # configured Ollama URL is remote it supplies the remote target host so the
+    # ARM guard allows routing to e.g. a Windows laptop; when routing is denied
+    # (localhost on ARM, no remote host, etc.) it safely falls back to the
+    # deterministic MockPlannerProvider.  So no real model runs unless the
+    # operator explicitly configures and enables remote inference.
     if config.agent.planner_backend == "model":
-        if config.host_role == "PHONE":
-            _provider = MockPlannerProvider()
-        else:
-            _provider = ModelPlannerProvider(config, router, providers)
+        _provider = ModelPlannerProvider(config, router, providers)
         planner = ModelDrivenPlanner(agent_limits, _provider)
     else:
         planner = RulePlanner(agent_limits)

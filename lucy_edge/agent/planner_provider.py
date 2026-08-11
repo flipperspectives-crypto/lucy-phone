@@ -189,6 +189,26 @@ class ModelPlannerProvider(PlannerProvider):
         self._fallback = MockPlannerProvider()
         self._planning_model = config.routing.default_model
 
+    def _resolve_target_host(self) -> Optional[str]:
+        """Resolve the routing target host for remote inference.
+
+        When the configured Ollama URL is remote (not localhost/loopback) and
+        matches a configured remote host, return that host's ID so the ARM
+        guard allows the request (target_host is not None).  Returns None for
+        localhost URLs (ARM guard blocks → safe fallback to mock) or when no
+        matching remote host is configured.
+        """
+        from ..routing.policy import _is_localhost_url
+
+        ollama_url = (self.config.providers.ollama_base_url or "").rstrip("/")
+        if not ollama_url or _is_localhost_url(ollama_url):
+            return None
+        for host in getattr(self.config, "remote_hosts", []) or []:
+            host_url = (host.base_url or "").rstrip("/")
+            if host_url and host_url == ollama_url:
+                return host.host_id
+        return None
+
     def generate_plan(
         self,
         goal: str,
@@ -211,6 +231,11 @@ class ModelPlannerProvider(PlannerProvider):
         from ..routing.hosts import HostRole
         from ..routing.policy import RoutingDecision, RoutingRequest
 
+        # When the configured Ollama URL is remote and matches a configured
+        # remote host, supply that host as the routing target.  This lets the
+        # ARM guard allow the request (target_host is not None) so planning
+        # can route to the Windows laptop instead of falling back to mock.
+        target_host = self._resolve_target_host()
         request = RoutingRequest(
             model=self._planning_model,
             provider=self.config.providers.default_provider,
@@ -220,6 +245,7 @@ class ModelPlannerProvider(PlannerProvider):
                 else HostRole.UNKNOWN
             ),
             host_id=self.config.host_id,
+            target_host=target_host,
         )
 
         result = self._run(self.router.route(request))

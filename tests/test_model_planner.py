@@ -10,6 +10,7 @@ done here (requires a running inference host).
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 from lucy_edge.agent.limits import AgentLimits
 from lucy_edge.agent.planner import ModelDrivenPlanner, Plan, PlanStep, RulePlanner
@@ -274,6 +275,163 @@ class MCPAwarePlanningTests(unittest.TestCase):
         match = _match_mcp_tool("read a file", schemas)
         self.assertIsNotNone(match)
         self.assertEqual(match["tool"], "mcp.fs-test.read_file")
+
+
+class RemotePlanningRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """Prove the ModelPlannerProvider routes remote planning requests to the
+    configured remote host on ARM, while localhost remains denied."""
+
+    def test_resolve_target_host_remote_url(self):
+        """A remote Ollama URL matching a configured remote host resolves to
+        that host's ID."""
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+        from lucy_edge.config import RemoteHostConfig
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.remote_hosts = [
+            RemoteHostConfig(
+                host_id="win-laptop",
+                role="LAPTOP",
+                provider="ollama",
+                base_url="http://10.202.5.66:11434",
+            )
+        ]
+        provider = ModelPlannerProvider(config, MagicMock(), MagicMock())
+        self.assertEqual(provider._resolve_target_host(), "win-laptop")
+
+    def test_resolve_target_host_localhost_returns_none(self):
+        """A localhost Ollama URL must NOT resolve to a remote host, so the
+        ARM guard continues to block local inference."""
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://127.0.0.1:11434"
+        config.remote_hosts = []
+        provider = ModelPlannerProvider(config, MagicMock(), MagicMock())
+        self.assertIsNone(provider._resolve_target_host())
+
+    def test_resolve_target_host_no_match_returns_none(self):
+        """A remote URL that matches no configured host returns None."""
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.remote_hosts = []
+        provider = ModelPlannerProvider(config, MagicMock(), MagicMock())
+        self.assertIsNone(provider._resolve_target_host())
+
+    async def test_remote_planning_routes_to_laptop_on_arm(self):
+        """On ARM, a remote planning request with a resolved target host routes
+        to the Windows laptop (REMOTE), not denied."""
+        from unittest.mock import MagicMock, patch
+
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+        from lucy_edge.config import RemoteHostConfig
+        from lucy_edge.routing.policy import RoutingDecision
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.providers.default_provider = "ollama"
+        config.routing.default_model = "qwen3:1.7b"
+        config.host_role = "PHONE"
+        config.host_id = "phone-1"
+        config.remote_hosts = [
+            RemoteHostConfig(
+                host_id="win-laptop",
+                role="LAPTOP",
+                provider="ollama",
+                base_url="http://10.202.5.66:11434",
+            )
+        ]
+
+        # Router that allows the request and returns ROUTE.
+        router = MagicMock()
+        router.route = AsyncMock(
+            return_value=MagicMock(decision=RoutingDecision.ROUTE)
+        )
+        provider = ModelPlannerProvider(config, router, MagicMock())
+
+        plan = provider.generate_plan("read a file", ["memory.search"], AgentLimits())
+        # Should NOT fall back to mock (which would produce a real plan step).
+        # Verify the router was called with target_host set.
+        router.route.assert_called_once()
+        request_arg = router.route.call_args[0][0]
+        self.assertEqual(request_arg.target_host, "win-laptop")
+
+    async def test_localhost_planning_denied_on_arm_falls_back(self):
+        """On ARM with a localhost URL, routing is denied and the provider
+        falls back to the MockPlannerProvider (safe)."""
+        from unittest.mock import MagicMock
+
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+        from lucy_edge.routing.policy import RoutingDecision, ReasonCode
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://127.0.0.1:11434"
+        config.providers.default_provider = "ollama"
+        config.routing.default_model = "qwen3:1.7b"
+        config.host_role = "PHONE"
+        config.host_id = "phone-1"
+        config.remote_hosts = []
+
+        router = MagicMock()
+        router.route = AsyncMock(
+            return_value=MagicMock(
+                decision=RoutingDecision.DENY,
+                reason_code=ReasonCode.ARM_LOCAL_INFERENCE_LOCKED,
+            )
+        )
+        provider = ModelPlannerProvider(config, router, MagicMock())
+
+        plan = provider.generate_plan(
+            "check system health", ["memory.search", "system.health"], AgentLimits()
+        )
+        # Falls back to MockPlannerProvider → produces a valid plan.
+        self.assertTrue(plan.steps)
+        tools_used = [s.tool for s in plan.steps if s.tool]
+        self.assertIn("system.health", tools_used)
+
+    async def test_unavailable_remote_falls_back_safely(self):
+        """When the remote host is unreachable (provider offline), the provider
+        falls back to the MockPlannerProvider."""
+        from unittest.mock import MagicMock
+
+        from lucy_edge.agent.planner_provider import ModelPlannerProvider
+        from lucy_edge.config import RemoteHostConfig
+        from lucy_edge.routing.policy import RoutingDecision, ReasonCode
+
+        config = MagicMock()
+        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.providers.default_provider = "ollama"
+        config.routing.default_model = "qwen3:1.7b"
+        config.host_role = "PHONE"
+        config.host_id = "phone-1"
+        config.remote_hosts = [
+            RemoteHostConfig(
+                host_id="win-laptop",
+                role="LAPTOP",
+                provider="ollama",
+                base_url="http://10.202.5.66:11434",
+            )
+        ]
+
+        router = MagicMock()
+        router.route = AsyncMock(
+            return_value=MagicMock(
+                decision=RoutingDecision.DENY,
+                reason_code=ReasonCode.PROVIDER_OFFLINE,
+            )
+        )
+        provider = ModelPlannerProvider(config, router, MagicMock())
+
+        plan = provider.generate_plan(
+            "check system health", ["memory.search", "system.health"], AgentLimits()
+        )
+        # Falls back to MockPlannerProvider → valid plan.
+        self.assertTrue(plan.steps)
+        tools_used = [s.tool for s in plan.steps if s.tool]
+        self.assertIn("system.health", tools_used)
 
 
 if __name__ == "__main__":
