@@ -182,7 +182,7 @@ class OllamaProvider(BaseProvider):
         )
 
     async def chat(self, messages: list[dict[str, Any]], model: str, **options: Any) -> ChatResponse:
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False, "think": False}
         payload.update(options)
         data = await self._request("POST", "/api/chat", payload)
         message = data.get("message", {})
