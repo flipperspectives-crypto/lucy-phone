@@ -159,7 +159,80 @@ class LoyalRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(result.devotional_alignment, 1.0)
             self.assertGreaterEqual(result.trust_metric, 0.0)
             self.assertLessEqual(result.trust_metric, 1.0)
-            
+
+        finally:
+            await services.close()
+
+    async def test_loyal_run_reflection_falls_back_without_provider(self):
+        """No provider wired -> generated_reflection is None (safe fallback)."""
+        services = await self._services()
+        try:
+            runtime = services.new_loyal_agent_run(
+                goal="check system health",
+                limits=AgentLimits(max_steps=3, max_tool_calls=3, task_timeout=10.0, tool_timeout=3.0),
+            )
+            # Force the no-provider path directly.
+            from lucy_core.runtime.loyal_runtime import create_loyal_runtime
+
+            rt = create_loyal_runtime(
+                goal="check system health",
+                limits=AgentLimits(max_steps=3, max_tool_calls=3, task_timeout=10.0, tool_timeout=3.0),
+                registry=services.tools,
+                devotional_core=services.devotional_core,
+                evidence=services.evidence,
+                memory_retrieval=services.retrieval,
+                context=services.context,
+                planner=services.planner,
+                provider=None,
+            )
+            result = await rt.run()
+            self.assertIsNone(result.generated_reflection)
+        finally:
+            await services.close()
+
+    async def test_loyal_run_uses_on_device_model_for_reflection(self):
+        """The on-device TinyTransformer is invoked for the run's reflection."""
+        import tempfile
+
+        from training.train import train
+
+        tmp = tempfile.mkdtemp()
+        summary = train(
+            repo_root=".",
+            checkpoint_dir=f"{tmp}/ckpts",
+            steps=20,
+            lr=0.05,
+            ctx=32,
+            d_model=32,
+            n_layers=1,
+            ff_mult=4,
+            seed=1,
+            batch_size=4,
+            stride=8,
+            lineage_db=f"{tmp}/lineage.db",
+            git_hash="testhash",
+        )
+
+        config = make_config(temp_dir())
+        config.providers.default_provider = "local_lucy"
+        config.training.checkpoint_path = summary["latest"]
+        config.training.lineage_db = f"{tmp}/lineage.db"
+        services = build_services(config)
+        await services.open()
+        try:
+            # The default provider must be the on-device, non-simulated model.
+            prov = services.providers.get("local_lucy")
+            self.assertIsNotNone(prov)
+            self.assertFalse(prov.simulated)
+
+            runtime = services.new_loyal_agent_run(
+                goal="check system health",
+                limits=AgentLimits(max_steps=3, max_tool_calls=3, task_timeout=15.0, tool_timeout=3.0),
+            )
+            result = await runtime.run()
+            # Inference actually happened on-device: a reflection was generated.
+            self.assertIsInstance(result.generated_reflection, str)
+            self.assertGreater(len(result.generated_reflection), 0)
         finally:
             await services.close()
 

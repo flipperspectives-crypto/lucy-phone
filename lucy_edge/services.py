@@ -214,6 +214,7 @@ class LucyEdgeServices:
             memory_retrieval=self.retrieval,
             context=self.context,
             planner=self.planner,
+            provider=self.providers.get(self.config.providers.default_provider),
         )
 
     def morning_review(self) -> "Any":

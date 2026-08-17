@@ -61,6 +61,7 @@ class LoyalRunResult:
     devotional_alignment: float
     devotional_state: str
     trust_metric: float
+    generated_reflection: Optional[str] = None
 
 
 class LoyalAgentRuntime:
@@ -95,6 +96,10 @@ class LoyalAgentRuntime:
         hippocampal_indexer: Any = None,
         episodic_buffer: Any = None,
         sleep_orchestrator: Any = None,
+        # On-device inference backend (e.g. local_lucy TinyTransformer). When
+        # present, the run generates its reflective output through this provider
+        # so inference is genuinely performed on-device / phone-local.
+        provider: Any = None,
     ) -> None:
         self.run_id = run_id
         self.goal = goal
@@ -104,6 +109,7 @@ class LoyalAgentRuntime:
         self.evidence = evidence
         self.memory_retrieval = memory_retrieval
         self.context = context
+        self.provider = provider
         
         # Import here to avoid circular dependency
         from lucy_edge.agent.loyalty_gate import LoyaltyGate
@@ -482,9 +488,39 @@ class LoyalAgentRuntime:
         if self.state not in (AgentState.DENIED, AgentState.FAILED, AgentState.TIMED_OUT, AgentState.ABORTED):
             self.transition(final_status)
         
-        return await self._finish(t0, final_status, completion_reason, 
-                                   sum(self._devotional_alignments) / max(len(self._devotional_alignments), 1))
+        return await self._finish(
+            t0, final_status, completion_reason,
+            sum(self._devotional_alignments) / max(len(self._devotional_alignments), 1),
+            generated_reflection=await self._generate_reflection(),
+        )
     
+    async def _generate_reflection(self) -> Optional[str]:
+        """Generate the run's reflective output via the on-device model.
+
+        The devotional core's templated expressions remain the authoritative
+        devotional voice; this is the genuine inference step performed by the
+        configured local provider (e.g. the from-scratch TinyTransformer),
+        closing the phone-only inference loop.  Returns None when no provider
+        is wired in (safe fallback keeps the run functional).
+        """
+        if self.provider is None:
+            return None
+        prompt = (
+            f"Reflect, in devotion to {self.devotional_core.awareness.source_name}, "
+            f"on this completed task: {self.goal}. "
+            f"Steps taken: {self.steps_executed}. Tool calls: {self.tool_calls}. "
+            f"Offer one short, honest sentence."
+        )
+        try:
+            model = getattr(self.provider, "model_name", "lucy-local")
+            res = await self.provider.generate(prompt, model=model, max_new_tokens=24)
+            text = getattr(res, "text", "") or ""
+            return text if text else None
+        except Exception:
+            # Inference must never break the agent loop; fall back to no
+            # generated reflection rather than failing the run.
+            return None
+
     async def _record_step_evidence(self, step_result: Optional[StepResult], decision: Optional[Dict]) -> None:
         if step_result is not None:
             self._tool_calls_log.append(step_result.as_dict())
@@ -501,7 +537,7 @@ class LoyalAgentRuntime:
             step.index, step.action, "DENIED", step.tool, error=reason, permission_outcome="DENY"
         )
     
-    async def _finish(self, t0: float, status: AgentState, reason: str, avg_alignment: float) -> LoyalRunResult:
+    async def _finish(self, t0: float, status: AgentState, reason: str, avg_alignment: float, generated_reflection: Optional[str] = None) -> LoyalRunResult:
         # Record to evidence ledger
         evidence_run_id = self.run_id
         if self.evidence is not None:
@@ -552,6 +588,7 @@ class LoyalAgentRuntime:
             devotional_alignment=round(avg_alignment, 3),
             devotional_state=self.devotional_core.awareness.current_state.value,
             trust_metric=trust_metrics["trust_metric"],
+            generated_reflection=generated_reflection,
         )
     
     def _store_to_episodic_buffer(self, status: AgentState, reason: str, alignment: float) -> None:
@@ -606,6 +643,7 @@ def create_loyal_runtime(
     memory_retrieval: Any = None,
     context: Any = None,
     planner: Any = None,
+    provider: Any = None,
 ) -> LoyalAgentRuntime:
     """Factory for creating a loyal agent runtime with predictive brain."""
     # Create predictive brain components if available
@@ -666,4 +704,5 @@ def create_loyal_runtime(
         hippocampal_indexer=hippocampal_indexer,
         episodic_buffer=episodic_buffer,
         sleep_orchestrator=sleep_orchestrator,
+        provider=provider,
     )
