@@ -1,16 +1,16 @@
 # Lucy Edge — runnable local config (S25 Ultra)
 #
-# Strictly local / offline by default: the safe `mock` provider is used so the
-# agent runs without any external model or network. To use a real local LLM,
-# set `default_provider: ollama` and point `providers.ollama_base_url` at your
-# Ollama instance (and enable phone local inference on this host).
+# PHONE-ONLY, ON-DEVICE design.  Inference runs locally on the device using the
+# from-scratch TinyTransformer trained by `python3 -m training.train` — never a
+# public cloud and never a remote LLM.  `mock` remains available as the safe
+# fallback.  Ollama / external LLM inference is intentionally out of scope here.
 #
 # The `training` section points at a REAL checkpoint produced by
 # `python3 -m training.train` (from-scratch, stdlib-only). Introspection reports
 # MODEL_WEIGHT_TRAINING as AVAILABLE only because this checkpoint + DONE lineage
 # run exist locally — never fabricated.
 
-default_provider: mock
+default_provider: local_lucy
 
 phone:
   phone_local_inference_enabled: true
