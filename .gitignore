@@ -13,3 +13,7 @@ __pycache__/
 
 # Logs
 logs/
+
+# Generated local training artifacts (reproducible via `python3 -m training.train`)
+training/checkpoints/
+training/lineage.db
