@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lucy_edge.services import build_services, _check_loyal_available  # noqa: E402
-from lucy_edge.config import LucyEdgeConfig  # noqa: E402
+from lucy_edge.config import LucyEdgeConfig, load_config  # noqa: E402
 
 
 async def _run_task(services, goal: str) -> None:
@@ -137,7 +137,8 @@ async def main_async(args) -> int:
         if not Path(args.config).exists():
             print(f"error: config not found: {args.config}", file=sys.stderr)
             return 2
-        services = build_services(config=args.config, transport=None, fixed_token="demo-token")
+        config = load_config(args.config)
+        services = build_services(config, transport=None, fixed_token="demo-token")
 
     await services.open()
     try:
