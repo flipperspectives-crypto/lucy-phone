@@ -326,3 +326,9 @@ def register_builtin_tools(registry: ToolRegistry, context: ToolContext) -> None
     ]
     for spec in tools:
         registry.register(spec)
+    # Isolated external Gemini tool — registered only when explicitly enabled
+    # and a key is present.  Kept in its own module; nothing here couples it to
+    # Lucy's core inference/router/foundation layers.
+    from .gemini import register_gemini_tool
+
+    register_gemini_tool(registry, context)

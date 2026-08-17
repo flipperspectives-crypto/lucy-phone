@@ -76,6 +76,9 @@ class PermissionPolicy:
     default_delete: PermissionOutcome = PermissionOutcome.ASK
     default_shell: PermissionOutcome = PermissionOutcome.DENY
     default_write: PermissionOutcome = PermissionOutcome.ASK
+    # External cloud tools (e.g. gemini.ask).  Fail-closed: when False the
+    # external tool is DENIED outright, regardless of registration.
+    allow_external: bool = False
 
     def _canonical_roots(self) -> list[Path]:
         return [Path(r).resolve() for r in self.approved_roots]
@@ -99,6 +102,18 @@ class PermissionPolicy:
         if "shell" in name or name in ("exec", "bash", "sh", "cmd"):
             return PermissionDecision(
                 self.default_shell, "arbitrary shell execution is denied by default"
+            )
+
+        # External cloud tools (e.g. gemini.ask).  Fail-closed: denied unless the
+        # operator has explicitly enabled external tools.  When enabled they
+        # still require per-call operator approval (ASK), never silent ALLOW.
+        if name.startswith("gemini.") or name.startswith("external."):
+            if not self.allow_external:
+                return PermissionDecision(
+                    PermissionOutcome.DENY, "external cloud tool disabled"
+                )
+            return PermissionDecision(
+                PermissionOutcome.ASK, "external cloud tool requires operator approval"
             )
 
         if name in ("git.status", "git.diff"):
@@ -186,10 +201,16 @@ class PermissionPolicy:
         return PermissionDecision(PermissionOutcome.ASK, "unclassified tool requires approval")
 
 
-def build_phone_policy(workspace: str) -> PermissionPolicy:
-    """Default phone-safe policy: workspace-scoped reads, ASK writes."""
+def build_phone_policy(workspace: str, allow_external: bool = False) -> PermissionPolicy:
+    """Default phone-safe policy: workspace-scoped reads, ASK writes.
+
+    ``allow_external`` gates external cloud tools (e.g. gemini.ask).  It defaults
+    to False (fail-closed); set True only when the operator has explicitly opted
+    in via config.gemini.enabled.
+    """
     return PermissionPolicy(
         approved_roots=[str(Path(workspace).resolve())],
         write_auto_allow=False,
         allow_git_write=False,
+        allow_external=allow_external,
     )
