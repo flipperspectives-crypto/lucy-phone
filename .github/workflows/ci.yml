@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  smoke-test:
+    name: Phone-only smoke test (train + CLI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          # No external deps required (stdlib only)
+
+      - name: Train on-device model
+        run: |
+          python3 -m training.train
+        timeout-minutes: 5
+
+      - name: Verify checkpoint exists
+        run: |
+          test -f training/checkpoints/latest.json
+          python3 -c "
+          import json
+          with open('training/checkpoints/latest.json') as f:
+              ckpt = json.load(f)
+          assert 'tok_emb' in ckpt and 'layers' in ckpt
+          print('Checkpoint structure OK:', list(ckpt.keys()))
+          "
+
+      - name: Run CLI headless (scripted session)
+        run: |
+          printf 'good morning\nrun check system health\nstate\ntrust\ngoodnight\nexit\n' | python3 lucy_cli.py --config lucy.yaml
+        timeout-minutes: 3
+
+      - name: Run test suite
+        run: |
+          python3 -m pytest -q --tb=short
+        timeout-minutes: 5
