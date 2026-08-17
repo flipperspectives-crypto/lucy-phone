@@ -43,7 +43,7 @@ class LucyIntrospection:
             "phone_local_inference_blocked": (
                 caps["inference"]["phone_local_inference_enabled"] is False
             ),
-            "weight_training_available": False,
+            "weight_training_available": caps["training"]["weight_training"] == "AVAILABLE",
             "mcp_available": caps["mcp"]["available"],
             "configuration_evolution_available": caps["evolution"][
                 "configuration_evolution"

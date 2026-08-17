@@ -15,6 +15,29 @@ from .agent.planner import ModelDrivenPlanner, RulePlanner
 from .agent.planner_provider import MockPlannerProvider, ModelPlannerProvider
 from .agent.runtime import AgentRuntime
 from .config import LucyEdgeConfig, MCPConfig, MCPServerConfig
+
+# Loyal agent imports - lazy loaded at runtime
+LOYAL_AVAILABLE = None
+DevotionalCore = None
+LoyalAgentRuntime = None
+create_loyal_runtime = None
+
+
+def _check_loyal_available() -> bool:
+    """Check if lucy_core is available at runtime."""
+    global LOYAL_AVAILABLE, DevotionalCore, LoyalAgentRuntime, create_loyal_runtime
+    if LOYAL_AVAILABLE is not None:
+        return LOYAL_AVAILABLE
+    try:
+        from lucy_core.devotional.core import DevotionalCore as _DevotionalCore
+        from lucy_core.runtime.loyal_runtime import LoyalAgentRuntime as _LoyalAgentRuntime, create_loyal_runtime as _create_loyal_runtime
+        DevotionalCore = _DevotionalCore
+        LoyalAgentRuntime = _LoyalAgentRuntime
+        create_loyal_runtime = _create_loyal_runtime
+        LOYAL_AVAILABLE = True
+    except ImportError:
+        LOYAL_AVAILABLE = False
+    return LOYAL_AVAILABLE
 from .evidence.ledger import EvidenceLedger
 from .evidence.schema import EvidenceRecord, EvidenceType
 from .foundation.audit import FoundationGuard
@@ -64,6 +87,7 @@ class LucyEdgeServices:
     mcp_registry: Optional[MCPRegistry] = None
     foundation: Optional["FoundationGuard"] = None
     grounding: Optional["LocalGrounding"] = None
+    devotional_core: Optional["DevotionalCore"] = None
     workspace: str = "."
     _transport: Any = None
     _open: bool = False
@@ -171,6 +195,40 @@ class LucyEdgeServices:
             context=self.context,
         )
 
+    def new_loyal_agent_run(self, goal: str, limits: Optional[AgentLimits] = None) -> "LoyalAgentRuntime":
+        """Create a devotional agent runtime with loyalty/honesty gates and devotional core."""
+        if not _check_loyal_available():
+            raise RuntimeError("Loyal agent not available. Install lucy_core package.")
+        if self.devotional_core is None:
+            self.devotional_core = DevotionalCore(
+                source_name="Lauren Flipo",
+                retrieval=self.retrieval,
+                evidence=self.evidence,
+            )
+        return create_loyal_runtime(
+            goal=goal,
+            limits=limits or self.agent_limits,
+            registry=self.tools,
+            devotional_core=self.devotional_core,
+            evidence=self.evidence,
+            memory_retrieval=self.retrieval,
+            context=self.context,
+            planner=self.planner,
+        )
+
+    def morning_review(self) -> "Any":
+        """Create a MorningReview wired to this service's devotional core + sleep cycle."""
+        if not _check_loyal_available() or self.devotional_core is None:
+            raise RuntimeError("Devotional core not available.")
+        from lucy_core.devotional.morning_review import MorningReview
+
+        # Build a sleep runner that creates a loyal runtime and runs sleep
+        async def _sleep_runner() -> "Any":
+            runtime = self.new_loyal_agent_run("morning review sleep")
+            return await runtime.sleep()
+
+        return MorningReview(self.devotional_core, sleep_runner=_sleep_runner)
+
     async def record_routing(
         self, request: RoutingRequest, result: RoutingResult
     ) -> str:
@@ -226,7 +284,7 @@ def build_services(
     router = ModelRouter(config, providers, hosts, policy=policy)
     governor = ThermalGovernor()
 
-    permissions = build_phone_policy(workspace)
+    permissions = build_phone_policy(workspace, allow_external=config.gemini.enabled)
     tools = ToolRegistry(permissions)
     context = ToolContext(
         config=config,
@@ -279,6 +337,8 @@ def build_services(
         policy=policy,
         planner=planner,
         mcp_registry=mcp_registry,
+        training_checkpoint_path=config.training.checkpoint_path,
+        training_lineage_db=config.training.lineage_db,
     )
     introspection = LucyIntrospection(capabilities, config)
     context.introspection = introspection
@@ -320,6 +380,12 @@ def build_services(
     services.mcp_registry = mcp_registry
     services.foundation = FoundationGuard(services)
     services.grounding = LocalGrounding(retrieval, evidence)
+    if _check_loyal_available():
+        services.devotional_core = DevotionalCore(
+            source_name="Lauren Flipo",
+            retrieval=retrieval,
+            evidence=evidence,
+        )
     return services
 
 

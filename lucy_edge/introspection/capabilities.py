@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..version import BUILD_PHASE, READINESS, __version__
+from .training_status import check_training
 
 
 class CapabilityIntrospection:
@@ -26,6 +27,8 @@ class CapabilityIntrospection:
         policy: Any,
         planner: Any = None,
         mcp_registry: Any = None,
+        training_checkpoint_path: Any = None,
+        training_lineage_db: Any = None,
     ) -> None:
         self.config = config
         self.providers = providers
@@ -38,6 +41,8 @@ class CapabilityIntrospection:
         self.policy = policy
         self.planner = planner
         self.mcp_registry = mcp_registry
+        self.training_checkpoint_path = training_checkpoint_path
+        self.training_lineage_db = training_lineage_db
 
     async def capabilities_report(self) -> dict[str, Any]:
         memory_count = (
@@ -54,6 +59,12 @@ class CapabilityIntrospection:
             if getattr(provider, "simulated", False):
                 continue
             model_names.append(provider.name)
+
+        # Honest training status: AVAILABLE only when a real, loadable local
+        # checkpoint exists (and a DONE lineage run references it). Never faked.
+        tstatus, tprov = check_training(
+            self.training_checkpoint_path, self.training_lineage_db
+        )
 
         return {
             "identity": {
@@ -105,20 +116,31 @@ class CapabilityIntrospection:
                 ),
                 "CONTEXT_WINDOW": "UNKNOWN",
                 "CONFIGURATION_EVOLUTION": "UNAVAILABLE",
-                "MODEL_WEIGHT_TRAINING": "UNAVAILABLE",
-                "MODEL_WEIGHT_MODIFICATION": "UNAVAILABLE",
+                "MODEL_WEIGHT_TRAINING": tstatus,
+                "MODEL_WEIGHT_MODIFICATION": tstatus,
                 "note": (
                     "APPLICATION_MEMORY is real SQLite memory, not model weights; "
-                    "weight training/modification stacks are absent in this build"
+                    + (
+                        "a locally trained Lucy checkpoint is present"
+                        if tstatus == "AVAILABLE"
+                        else "weight training/modification stacks are absent in this build"
+                    )
                 ),
             },
             "training": {
-                "weight_training": "UNAVAILABLE",
-                "weight_modification": "UNAVAILABLE",
-                "training_library": None,
-                "gradient_descent": "UNAVAILABLE",
+                "weight_training": tstatus,
+                "weight_modification": tstatus,
+                "training_library": (
+                    "training.train (pure python, from-scratch)" if tstatus == "AVAILABLE" else None
+                ),
+                "gradient_descent": tstatus,
                 "loRA_adapters": "UNAVAILABLE",
-                "note": "no training library is installed; no training is claimed",
+                "provenance": tprov if tstatus == "AVAILABLE" else {},
+                "note": (
+                    "locally trained TinyTransformer on a provenance-tagged corpus"
+                    if tstatus == "AVAILABLE"
+                    else "no training library is installed; no training is claimed"
+                ),
             },
             "evolution": {
                 "configuration_evolution": "UNAVAILABLE",
