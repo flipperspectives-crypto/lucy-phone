@@ -249,7 +249,10 @@ class ModelPlannerProvider(PlannerProvider):
         )
 
         result = self._run(self.router.route(request))
-        if result.decision != RoutingDecision.ALLOW:
+        # ROUTE is the router's successful decision for remote-host routing
+        # (REMOTE_HOST_SELECTED); ALLOW is the success decision for local/non-phone
+        # inference.  Both must proceed to the LLM; anything else is a denial.
+        if result.decision not in (RoutingDecision.ALLOW, RoutingDecision.ROUTE):
             return self._fallback.generate_plan(goal, available_tools, limits, tool_schemas)
 
         provider = self.providers.get(request.provider)
