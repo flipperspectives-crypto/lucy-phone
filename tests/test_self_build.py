@@ -251,12 +251,55 @@ class SelfBuildFoundationTests(unittest.IsolatedAsyncioTestCase):
         try:
             report = await services.introspection.report()
             self.assertEqual(report["inference"]["default_provider"], "mock")
-            self.assertEqual(report["inference"]["real_providers_registered"], ["ollama"])
+            # Phone-only, on-device design: no external/remote LLM is registered
+            # by default. The locally trained TinyTransformer (local_lucy) appears
+            # here only when a real checkpoint is wired in (see the test below).
+            self.assertEqual(report["inference"]["real_providers_registered"], [])
             self.assertTrue(report["inference"]["local_inference_blocked"])
             self.assertEqual(report["memory"]["memory_backend"], "sqlite")
             self.assertFalse(report["agent"]["autonomous_replication"])
             self.assertEqual(report["training"]["weight_training"], "UNAVAILABLE")
             self.assertEqual(report["capability_classification"]["MODEL_WEIGHT_TRAINING"], "UNAVAILABLE")
+        finally:
+            await services.close()
+
+    async def test_introspection_reports_local_tiny_transformer(self):
+        """The on-device, from-scratch TinyTransformer registers as a real
+        (non-simulated) provider when a local checkpoint is wired in -- the
+        phone-only inference path, no Ollama / no cloud."""
+        import tempfile
+
+        from training.train import train
+
+        tmp = tempfile.mkdtemp()
+        ckpt_dir = f"{tmp}/ckpts"
+        ledger_db = f"{tmp}/lineage.db"
+        summary = train(
+            repo_root=".",
+            checkpoint_dir=ckpt_dir,
+            steps=20,
+            lr=0.05,
+            ctx=32,
+            d_model=32,
+            n_layers=1,
+            ff_mult=4,
+            seed=1,
+            batch_size=4,
+            stride=8,
+            lineage_db=ledger_db,
+            git_hash="testhash",
+        )
+
+        config = make_config(temp_dir())
+        config.training.checkpoint_path = summary["latest"]
+        config.training.lineage_db = ledger_db
+
+        services = build_services(config)
+        await services.open()
+        try:
+            report = await services.introspection.report()
+            self.assertIn("local_lucy", report["inference"]["real_providers_registered"])
+            self.assertEqual(report["training"]["weight_training"], "AVAILABLE")
         finally:
             await services.close()
 
