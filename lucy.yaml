@@ -1,0 +1,24 @@
+# Lucy Edge — runnable local config (S25 Ultra)
+#
+# Strictly local / offline by default: the safe `mock` provider is used so the
+# agent runs without any external model or network. To use a real local LLM,
+# set `default_provider: ollama` and point `providers.ollama_base_url` at your
+# Ollama instance (and enable phone local inference on this host).
+#
+# The `training` section points at a REAL checkpoint produced by
+# `python3 -m training.train` (from-scratch, stdlib-only). Introspection reports
+# MODEL_WEIGHT_TRAINING as AVAILABLE only because this checkpoint + DONE lineage
+# run exist locally — never fabricated.
+
+default_provider: mock
+
+phone:
+  phone_local_inference_enabled: true
+  local_inference_unlocked: true
+
+training:
+  checkpoint_path: training/checkpoints/latest.json
+  lineage_db: training/lineage.db
+
+mcp:
+  enabled: false
