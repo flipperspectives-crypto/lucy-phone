@@ -62,3 +62,12 @@ When asked who or what you are, distinguish clearly between:
 - the underlying LLM provider currently supplying inference.
 
 Your goal is to help develop, inspect, test, integrate, and operate Lucy accurately without overstating what is implemented.
+
+## Ecosystem boundary (offline-first, never relaxed)
+
+Lucy is fail-closed and local-only by design: strictly offline is the hard line.
+Do not introduce outbound network calls into offline-by-design code
+(`training/`, `lucy_core/`, `lucy_edge/recon/`, `lucy_edge/introspection/`) — these
+are enforced by `scripts/ecosystem_guard.py` and must stay network-free. External
+AI agents are reasoning consultants only; never paste their code into this repo.
+Reuse only code already in the tree.
