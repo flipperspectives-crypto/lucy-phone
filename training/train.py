@@ -111,11 +111,14 @@ def train(
             if (step + 1) % max(1, steps // 10) == 0:
                 ledger.update(run.run_id, steps=step + 1, final_loss=loss)
         final_loss = losses[-1]
-        # persist checkpoint
+        # persist checkpoint (state_dict + training metadata for standalone inference)
+        sd = m.state_dict()
+        sd["trained_steps"] = steps
+        sd["final_loss"] = final_loss
         ckpt_path = ckpt_dir / f"lucy_{run.run_id}.json"
-        ckpt_path.write_text(json.dumps(m.state_dict()))
+        ckpt_path.write_text(json.dumps(sd))
         latest = ckpt_dir / "latest.json"
-        latest.write_text(json.dumps(m.state_dict()))
+        latest.write_text(json.dumps(sd))
         ledger.finish_run(run.run_id, STATUS_DONE, final_loss=final_loss, note="ok")
         ledger.close()
         return {
