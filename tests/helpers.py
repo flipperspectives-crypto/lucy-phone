@@ -75,22 +75,47 @@ def temp_dir() -> str:
 
 
 def local_checkpoint(tmp: str) -> str:
-    """Write a real (tiny, randomly-initialized) ``local_lucy`` checkpoint so
-    ``LocalLucyProvider`` registers, reports healthy, AND can actually run
-    on-device generation in tests.
+    """Write an *untrained* (random-initialized) ``local_lucy`` checkpoint so
+    ``LocalLucyProvider`` registers and can run on-device generation in tests.
 
-    The weights are random (not trained), so generated text is meaningless --
-    the honest "model_weights_present" GAP is about *trained* quality, not file
-    presence.  Real generation requires a trained checkpoint (Step 2).
+    The weights are random and carry NO training metadata, so ``check_training``
+    reports ``UNTR*AINED`` and the foundation audit reports the honest
+    "model present but untrained" GAP.  Real generation requires a genuinely
+    trained checkpoint (see ``trained_checkpoint`` / Step 2).
     """
     cp = Path(tmp) / "lucy_local_checkpoint.json"
     from training.tiny_transformer import TinyTransformer
 
     model = TinyTransformer(vocab=256, d_model=64, ctx=32, n_layers=2, ff_mult=4, seed=1)
-    sd = model.state_dict()
-    sd.update({"vocab": 256, "d": 64, "ctx": 32, "L": 2, "ff": 4, "trained_steps": 5, "final_loss": 3.21})
-    cp.write_text(json.dumps(sd))
+    cp.write_text(json.dumps(model.state_dict()))
     return str(cp)
+
+
+def trained_checkpoint(tmp: str, steps: int = 12) -> str:
+    """Train a genuinely trained checkpoint in a temp dir and return its path.
+
+    Used by tests that need a *trained* local model (e.g. to verify the
+    foundation audit reports ``model_weights_present`` as PASS).
+    """
+    from training.train import train
+
+    ckpt_dir = Path(tmp) / "trained_ckpts"
+    summary = train(
+        repo_root=".",
+        checkpoint_dir=str(ckpt_dir),
+        steps=steps,
+        lr=0.05,
+        ctx=32,
+        d_model=32,
+        n_layers=1,
+        ff_mult=4,
+        seed=1,
+        batch_size=4,
+        stride=8,
+        lineage_db=str(Path(tmp) / "lineage.db"),
+        git_hash="testhash",
+    )
+    return summary["latest"]
 
 
 def make_services(tmp: str, **kwargs: Any):

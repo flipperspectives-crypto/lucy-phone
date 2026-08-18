@@ -125,6 +125,7 @@ class LocalLucyProvider(BaseProvider):
         ctx_ids = ids[-m.ctx :] if len(ids) >= m.ctx else ids
         generated: list[int] = []
         import math as _math
+        import random as _random
 
         for _ in range(max_new):
             window = ctx_ids[-m.ctx :]
@@ -135,7 +136,7 @@ class LocalLucyProvider(BaseProvider):
                 mx = max(last)
                 exps = [_math.exp((x - mx) / temperature) for x in last]
                 s = sum(exps)
-                r = _math.random()  # noqa: used only when temperature>0
+                r = _random.random()  # noqa: used only when temperature > 0
                 acc = 0.0
                 nxt = len(last) - 1
                 for i, e in enumerate(exps):

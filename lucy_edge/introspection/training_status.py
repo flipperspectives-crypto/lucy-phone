@@ -2,9 +2,14 @@
 
 This module deliberately uses only the standard library (json, sqlite3, os) so
 that lucy_edge does not depend on the standalone ``training`` package.  It
-reports ``AVAILABLE`` ONLY when a real, loadable checkpoint file exists and
-(optionally) a lineage ledger records a DONE run for it.  It never fabricates
-availability.
+returns one of three honest states:
+
+  * ``UNAVAILABLE`` -- no loadable checkpoint file exists.
+  * ``UNTRAINED``   -- a checkpoint loads but carries no training metadata (a
+                       random-initialized placeholder, not from ``train()``).
+  * ``AVAILABLE``   -- a real, trained checkpoint (produced by ``train()``) exists.
+
+It never fabricates availability.
 """
 
 from __future__ import annotations
@@ -44,6 +49,11 @@ def check_training(
         },
         "source": "training.train (from-scratch, local, provenance-tagged corpus)",
     }
+
+    if "trained_steps" not in sd or sd.get("trained_steps") is None:
+        # File loads but carries no training metadata: an untrained /
+        # random-initialized placeholder, not a model produced by train().
+        return "UNTRAINED", provenance
 
     if lineage_db:
         db = Path(lineage_db)

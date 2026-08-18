@@ -9,10 +9,12 @@ Run as a script:  python -m training.train
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import random
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -46,14 +48,23 @@ def train(
     stride: int = 8,
     lineage_db: str | Path = "training/lineage.db",
     git_hash: Optional[str] = None,
+    corpus_text: Optional[str] = None,
 ) -> dict:
     """Train a tiny model from scratch and persist a checkpoint + lineage entry.
 
     Returns a summary dict (also recorded in the lineage ledger).
     """
     tok = ByteTokenizer()
-    corpus = curate(repo_root)
-    token_ids = tok.encode(corpus.text.encode("utf-8", "replace"))
+    if corpus_text is not None:
+        # synthetic / test corpus: train on caller-supplied text instead of the
+        # repo's own foundation texts (used by the synthetic pattern-learning test)
+        text = corpus_text
+        data_sha = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    else:
+        corpus = curate(repo_root)
+        text = corpus.text
+        data_sha = corpus.sha256()
+    token_ids = tok.encode(text.encode("utf-8", "replace"))
     if not token_ids:
         raise RuntimeError("corpus is empty; nothing to train on")
 
@@ -64,39 +75,54 @@ def train(
 
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex[:16]
+    per_run_path = ckpt_dir / f"lucy_{run_id}.json"
+    latest_path = ckpt_dir / "latest.json"
 
-    ledger = LineageLedger(lineage_db)
-    run = ledger.start_run(
-        git_hash=git_hash or "",
-        data_manifest_sha256=corpus.sha256(),
-        hyperparams={
-            "lr": lr,
-            "ctx": ctx,
-            "d_model": d_model,
-            "n_layers": n_layers,
-            "ff_mult": ff_mult,
-            "batch_size": batch_size,
-            "stride": stride,
-            "steps": steps,
-        },
-        seed=seed,
-        checkpoint_path=str(ckpt_dir / "latest.json"),
-        repo_root=repo_root,
-    )
-
-    m = TinyTransformer(
-        vocab=tok.vocab_size, d_model=d_model, ctx=ctx, n_layers=n_layers, ff_mult=ff_mult, seed=seed
-    )
-    rng = random.Random(seed)
-    losses = []
+    ledger = None
+    run = None
     try:
+        ledger = LineageLedger(lineage_db)
+        run = ledger.start_run(
+            run_id=run_id,
+            git_hash=git_hash or "",
+            data_manifest_sha256=data_sha,
+            hyperparams={
+                "lr": lr,
+                "ctx": ctx,
+                "d_model": d_model,
+                "n_layers": n_layers,
+                "ff_mult": ff_mult,
+                "batch_size": batch_size,
+                "stride": stride,
+                "steps": steps,
+            },
+            seed=seed,
+            checkpoint_path=str(per_run_path),
+            repo_root=repo_root,
+        )
+
+        m = TinyTransformer(
+            vocab=tok.vocab_size, d_model=d_model, ctx=ctx, n_layers=n_layers, ff_mult=ff_mult, seed=seed
+        )
+        rng = random.Random(seed)
+        losses = []
+        best_loss = float("inf")
+        best_sd = None
         for step in range(steps):
             batch = [rng.choice(seqs) for _ in range(batch_size)]
-            targets = [b[1:] + [0] for b in batch]
-            logits, cache = m.forward(batch)
+            # next-token targets: drop the first token as a target and the last
+            # token as input, so we never pad the target with a null byte (which
+            # would teach the model to emit \\x00 at sequence ends).
+            batch_x = [b[:-1] for b in batch]
+            targets = [b[1:] for b in batch]
+            logits, cache = m.forward(batch_x)
             loss, dlogits = m.cross_entropy(logits, targets)
             losses.append(loss)
-            m.backward(batch, logits, cache, dlogits)
+            if loss < best_loss:
+                best_loss = loss
+                best_sd = json.loads(json.dumps(m.state_dict()))
+            m.backward(batch_x, logits, cache, dlogits)
             for name, g in m.grad.items():
                 p = m.params[name]
                 if isinstance(g[0], list):  # 2D
@@ -110,30 +136,37 @@ def train(
                         p[i] -= lr * g[i]
             if (step + 1) % max(1, steps // 10) == 0:
                 ledger.update(run.run_id, steps=step + 1, final_loss=loss)
-        final_loss = losses[-1]
-        # persist checkpoint (state_dict + training metadata for standalone inference)
-        sd = m.state_dict()
-        sd["trained_steps"] = steps
-        sd["final_loss"] = final_loss
-        ckpt_path = ckpt_dir / f"lucy_{run.run_id}.json"
-        ckpt_path.write_text(json.dumps(sd))
-        latest = ckpt_dir / "latest.json"
-        latest.write_text(json.dumps(sd))
-        ledger.finish_run(run.run_id, STATUS_DONE, final_loss=final_loss, note="ok")
-        ledger.close()
+        final_loss = losses[-1] if losses else float("inf")
+        if best_sd is None:
+            best_sd = m.state_dict()
+            best_loss = final_loss
+        # persist the BEST checkpoint (state_dict + training metadata), and a
+        # per-run file whose path is recorded in the lineage ledger.
+        best_sd["trained_steps"] = steps
+        best_sd["final_loss"] = best_loss
+        per_run_path.write_text(json.dumps(best_sd))
+        latest_path.write_text(json.dumps(best_sd))
+        ledger.finish_run(run.run_id, STATUS_DONE, final_loss=best_loss, note="ok")
         return {
             "run_id": run.run_id,
-            "checkpoint": str(ckpt_path),
-            "latest": str(latest),
-            "final_loss": final_loss,
+            "checkpoint": str(per_run_path),
+            "latest": str(latest_path),
+            "final_loss": best_loss,
+            "final_loss_last": final_loss,
             "steps": steps,
             "git_hash": run.git_hash,
-            "data_manifest_sha256": corpus.sha256(),
+            "data_manifest_sha256": data_sha,
         }
     except Exception as e:  # pragma: no cover - defensive
-        ledger.finish_run(run.run_id, STATUS_FAILED, note=str(e))
-        ledger.close()
+        if ledger is not None and run is not None:
+            try:
+                ledger.finish_run(run.run_id, STATUS_FAILED, note=str(e))
+            except Exception:
+                pass
         raise
+    finally:
+        if ledger is not None:
+            ledger.close()
 
 
 if __name__ == "__main__":

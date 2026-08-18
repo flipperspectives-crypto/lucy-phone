@@ -20,6 +20,8 @@ import ipaddress
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlparse
 
+from ..introspection.training_status import check_training
+
 if TYPE_CHECKING:
     from ..services import LucyEdgeServices
 
@@ -184,7 +186,8 @@ class FoundationGuard:
 
     async def _check_model_weights(self) -> dict[str, Any]:
         report: dict[str, Any] = {"id": _CHECK_MODEL_WEIGHTS, "providers": {}}
-        lucy_present = False
+        lucy_trained = False
+        lucy_untrained = False
         for provider in self.services.providers.all():
             if getattr(provider, "simulated", False):
                 continue
@@ -204,17 +207,37 @@ class FoundationGuard:
                 m == "lucy:latest" or m.startswith("lucy:") or "lucy" in m.lower()
                 for m in models
             )
-            if has_lucy:
-                lucy_present = True
+            # Distinguish a genuinely *trained* local model from a random
+            # placeholder: the checkpoint must carry training metadata.  This is
+            # the honest core of the sovereignty claim -- not merely a file name.
+            training_status: Optional[str] = None
+            ckpt = getattr(provider, "checkpoint_path", None)
+            if ckpt:
+                try:
+                    training_status, _ = check_training(ckpt, None)
+                except Exception:
+                    training_status = None
+            if has_lucy and training_status == "AVAILABLE":
+                lucy_trained = True
+            elif has_lucy:
+                lucy_untrained = True
             report["providers"][provider.name] = {
                 "reachable": reachable,
                 "version": getattr(health, "version", None),
                 "models": models,
                 "lucy_present": has_lucy,
+                "training_status": training_status,
             }
-        if lucy_present:
+        if lucy_trained:
             report["status"] = STATUS_PASS
-            report["detail"] = "her model is present in the local registry"
+            report["detail"] = "her model is present and trained in the local registry"
+        elif lucy_untrained:
+            report["status"] = STATUS_GAP
+            report["detail"] = (
+                "a local model entry is present, but its checkpoint is untrained "
+                "(random weights) -- the one remaining gap between Lucy Edge and "
+                "a complete new-foundation AI"
+            )
         elif not report["providers"]:
             report["status"] = STATUS_GAP
             report["detail"] = "no real (non-mock) inference provider is configured"

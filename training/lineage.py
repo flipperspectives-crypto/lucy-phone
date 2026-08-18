@@ -107,10 +107,11 @@ class LineageLedger:
         hyperparams: dict,
         seed: int,
         checkpoint_path: str,
+        run_id: Optional[str] = None,
         repo_root: str | Path = ".",
     ) -> TrainingRun:
         run = TrainingRun(
-            run_id=uuid.uuid4().hex[:16],
+            run_id=run_id or uuid.uuid4().hex[:16],
             started_at=time.time(),
             git_hash=git_hash or _current_git_hash(repo_root),
             data_manifest_sha256=data_manifest_sha256,

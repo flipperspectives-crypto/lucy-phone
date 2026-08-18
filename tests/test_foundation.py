@@ -24,7 +24,7 @@ from lucy_edge.memory.schema import MemoryRecord, MemoryType, ProvenanceCategory
 from lucy_edge.routing.hosts import HostRole, HostState, HostStatus
 from lucy_edge.services import build_services
 
-from .helpers import FakeTransport, make_config, temp_dir
+from .helpers import FakeTransport, local_checkpoint, make_config, trained_checkpoint, temp_dir
 
 
 class EndpointClassificationTests(unittest.TestCase):
@@ -117,6 +117,29 @@ class FoundationAuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(statuses["no_cloud_endpoints"], STATUS_PASS)
         finally:
             await services.close()
+
+    async def _audit_with_checkpoint(self, checkpoint_path: str):
+        config = make_config(temp_dir(), phone_local_inference=True)
+        config.training.checkpoint_path = checkpoint_path
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        services = build_services(config, transport=transport)
+        await services.open()
+        try:
+            audit = await services.foundation.audit()
+            return {c["id"]: c["status"] for c in audit["checks"]}
+        finally:
+            await services.close()
+
+    async def test_trained_model_passes_audit(self):
+        tmp = temp_dir()
+        statuses = await self._audit_with_checkpoint(trained_checkpoint(tmp))
+        self.assertEqual(statuses["model_weights_present"], STATUS_PASS)
+
+    async def test_untrained_model_gaps_audit(self):
+        tmp = temp_dir()
+        statuses = await self._audit_with_checkpoint(local_checkpoint(tmp))
+        self.assertEqual(statuses["model_weights_present"], STATUS_GAP)
 
 
 class LocalGroundingTests(unittest.IsolatedAsyncioTestCase):

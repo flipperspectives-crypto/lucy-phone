@@ -180,11 +180,111 @@ class TestTrainAndProvider(unittest.TestCase):
         import os
 
         summary, ledger_db = self._train_tmp()
-        status, prov = check_training(summary["latest"], ledger_db)
+        # file-based check (no ledger) -> AVAILABLE from training metadata alone
+        self.assertEqual(check_training(summary["latest"], None)[0], "AVAILABLE")
+        # ledger enrichment matches the per-run checkpoint the ledger records
+        status, prov = check_training(summary["checkpoint"], ledger_db)
         self.assertEqual(status, "AVAILABLE")
         self.assertEqual(prov["git_hash"], "testhash")
         # bogus path must stay UNAVAILABLE (never fabricated)
         self.assertEqual(check_training("/nonexistent.json", None)[0], "UNAVAILABLE")
+
+
+class TestTrainingStatusStates(unittest.TestCase):
+    def _write(self, tmp, trained):
+        import json, os
+
+        from training.tiny_transformer import TinyTransformer
+
+        sd = TinyTransformer(vocab=256, d_model=16, ctx=16).state_dict()
+        if trained:
+            sd["trained_steps"] = 10
+            sd["final_loss"] = 2.0
+        p = os.path.join(tmp, "ckpt.json")
+        with open(p, "w") as f:
+            f.write(json.dumps(sd))
+        return p
+
+    def test_states(self):
+        import os, tempfile
+
+        tmp = tempfile.mkdtemp()
+        try:
+            self.assertEqual(check_training(self._write(tmp, trained=False), None)[0], "UNTRAINED")
+            self.assertEqual(check_training(self._write(tmp, trained=True), None)[0], "AVAILABLE")
+            self.assertEqual(check_training("/nonexistent.json", None)[0], "UNAVAILABLE")
+        finally:
+            for f in os.listdir(tmp):
+                os.unlink(os.path.join(tmp, f))
+            os.rmdir(tmp)
+
+
+class TestProviderSampling(unittest.TestCase):
+    def test_temperature_sampling_works(self):
+        import asyncio, os, shutil, tempfile
+
+        from .helpers import trained_checkpoint
+
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            prov = LocalLucyProvider(checkpoint_path=cp, model_name="lucy-local")
+            res = asyncio.run(
+                prov.generate("LUCY is", model="lucy-local", max_new_tokens=12, temperature=0.9)
+            )
+            self.assertEqual(res.provider, "local_lucy")
+            self.assertFalse(res.simulated)
+            self.assertIsInstance(res.text, str)
+            self.assertGreater(len(res.text), 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestSyntheticPatternLearning(unittest.TestCase):
+    """Proves the model learns a *rule* (generalization), not just loss decrease.
+
+    Trains on a perfectly alternating A/B byte pattern with equal class balance
+    (so no whitespace/byte-collapse), then checks held-out continuations the
+    model never saw as isolated prompts: "AB" -> A, "ABA" -> B.
+    """
+
+    def test_learns_alternating_pattern(self):
+        import asyncio, os, shutil, tempfile
+
+        from training.train import train
+        from training.provider import LocalLucyProvider
+
+        tmp = tempfile.mkdtemp()
+        try:
+            pattern = "AB" * 2000  # 4000 bytes, balanced A(65)/B(66)
+            summary = train(
+                repo_root=".",
+                corpus_text=pattern,
+                checkpoint_dir=os.path.join(tmp, "ck"),
+                steps=400,
+                lr=0.05,
+                ctx=16,
+                d_model=32,
+                n_layers=1,
+                ff_mult=4,
+                seed=1,
+                batch_size=4,
+                stride=2,
+                lineage_db=os.path.join(tmp, "lineage.db"),
+                git_hash="test",
+            )
+            self.assertLess(summary["final_loss"], 6.0)
+            prov = LocalLucyProvider(checkpoint_path=summary["latest"], model_name="lucy-local")
+            g1 = asyncio.run(
+                prov.generate("AB", model="lucy-local", max_new_tokens=1, temperature=0.0)
+            ).text
+            g2 = asyncio.run(
+                prov.generate("ABA", model="lucy-local", max_new_tokens=1, temperature=0.0)
+            ).text
+            self.assertEqual(g1, "A")
+            self.assertEqual(g2, "B")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
