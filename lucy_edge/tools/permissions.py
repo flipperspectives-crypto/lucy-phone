@@ -76,7 +76,7 @@ class PermissionPolicy:
     default_delete: PermissionOutcome = PermissionOutcome.ASK
     default_shell: PermissionOutcome = PermissionOutcome.DENY
     default_write: PermissionOutcome = PermissionOutcome.ASK
-    # External cloud tools (e.g. gemini.ask).  Fail-closed: when False the
+    # External cloud tools.  Fail-closed: when False the
     # external tool is DENIED outright, regardless of registration.
     allow_external: bool = False
 
@@ -104,10 +104,10 @@ class PermissionPolicy:
                 self.default_shell, "arbitrary shell execution is denied by default"
             )
 
-        # External cloud tools (e.g. gemini.ask).  Fail-closed: denied unless the
+        # External cloud tools.  Fail-closed: denied unless the
         # operator has explicitly enabled external tools.  When enabled they
         # still require per-call operator approval (ASK), never silent ALLOW.
-        if name.startswith("gemini.") or name.startswith("external."):
+        if name.startswith("external."):
             if not self.allow_external:
                 return PermissionDecision(
                     PermissionOutcome.DENY, "external cloud tool disabled"
@@ -204,9 +204,9 @@ class PermissionPolicy:
 def build_phone_policy(workspace: str, allow_external: bool = False) -> PermissionPolicy:
     """Default phone-safe policy: workspace-scoped reads, ASK writes.
 
-    ``allow_external`` gates external cloud tools (e.g. gemini.ask).  It defaults
+    ``allow_external`` gates external cloud tools.  It defaults
     to False (fail-closed); set True only when the operator has explicitly opted
-    in via config.gemini.enabled.
+    in.
     """
     return PermissionPolicy(
         approved_roots=[str(Path(workspace).resolve())],

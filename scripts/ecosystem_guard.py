@@ -18,12 +18,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Paths that are offline-by-design. Missing paths are skipped (e.g. lucy_edge/recon
-# before it is created).
+# Paths that are offline-by-design. Missing paths are skipped.
 OFFLINE_PATHS = [
     "training",
     "lucy_core",
-    "lucy_edge/recon",
     "lucy_edge/introspection",
 ]
 

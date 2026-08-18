@@ -285,7 +285,7 @@ def build_services(
     router = ModelRouter(config, providers, hosts, policy=policy)
     governor = ThermalGovernor()
 
-    permissions = build_phone_policy(workspace, allow_external=config.gemini.enabled)
+    permissions = build_phone_policy(workspace, allow_external=False)
     tools = ToolRegistry(permissions)
     context = ToolContext(
         config=config,

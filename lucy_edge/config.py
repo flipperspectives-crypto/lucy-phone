@@ -12,9 +12,6 @@ Environment variables follow the NEXUS_* conventions:
     NEXUS_PHONE_LOCAL_INFERENCE_ENABLED
     NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED
     NEXUS_SESSION_TOKEN    (auth token; overrides data/operator.token file)
-    NEXUS_GEMINI_API_KEY   (Gemini API key for the isolated gemini.ask tool; env only)
-    NEXUS_GEMINI_MODEL     (Gemini model id, e.g. gemini-2.0-flash)
-    NEXUS_GEMINI_ENABLED   (set true to register the gemini.ask tool; default false)
 """
 
 from __future__ import annotations
@@ -77,21 +74,6 @@ class GatewayConfig(BaseModel):
     auth_enabled: bool = True
     max_requests_per_window: int = 120
     rate_window_seconds: float = 60.0
-
-
-class GeminiConfig(BaseModel):
-    """Isolated external Gemini calling tool (NOT a core inference provider).
-
-    Deliberately separate from Lucy's inference providers.  The API key is ONLY
-    ever sourced from the NEXUS_GEMINI_API_KEY environment variable — it must
-    never be written into YAML or code.  ``enabled`` is fail-closed (False):
-    when disabled the tool is never registered and can never be invoked.
-    """
-
-    enabled: bool = False
-    api_key: Optional[str] = None  # populated from NEXUS_GEMINI_API_KEY only
-    model: str = "gemini-2.0-flash"
-    timeout: float = 60.0
 
 
 class ProviderConfig(BaseModel):
@@ -243,7 +225,6 @@ class LucyEdgeConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
-    gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     remote_hosts: list[RemoteHostConfig] = Field(default_factory=list)
     introspection: IntrospectionConfig = Field(default_factory=IntrospectionConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
@@ -278,11 +259,6 @@ _ENV_OVERRIDES: dict[str, tuple[str, Any]] = {
     # Required (with PHONE_LOCAL_INFERENCE_ENABLED) to run local inference on
     # ARM hosts.  Intentionally separate so the two flags must both be set.
     "NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED": ("phone.local_inference_unlocked", bool),
-    # NEXUS_GEMINI_API_KEY supplies the Gemini API key for the isolated
-    # gemini.ask tool.  It is NEVER read from YAML — env only.
-    "NEXUS_GEMINI_API_KEY": ("gemini.api_key", str),
-    "NEXUS_GEMINI_MODEL": ("gemini.model", str),
-    "NEXUS_GEMINI_ENABLED": ("gemini.enabled", bool),
 }
 
 
