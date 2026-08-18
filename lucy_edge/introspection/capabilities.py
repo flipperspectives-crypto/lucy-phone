@@ -87,17 +87,7 @@ class CapabilityIntrospection:
                 "default_provider": (
                     self.config.providers.default_provider if self.config else None
                 ),
-                "remote_hosts": [
-                    {
-                        "host_id": h.host_id,
-                        "status": h.status.value,
-                        "role": h.role.value,
-                        "provider": h.provider,
-                        "models": h.models,
-                        "registered": h.registered_at is not None,
-                    }
-                    for h in hosts
-                ],
+                "remote_hosts": [],
                 "real_providers_registered": model_names,
             },
             "memory": {

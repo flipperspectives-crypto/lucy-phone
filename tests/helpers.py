@@ -1,11 +1,12 @@
 """Shared test helpers.
 
-Tests use temp directories only.  No live model, no Ollama, no network to any
-real inference host: the Ollama provider is exercised with a FakeTransport.
+Tests use temp directories only.  No live model, no remote inference host, no
+network to any real inference endpoint.
 """
 
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 from pathlib import Path
@@ -73,16 +74,32 @@ def temp_dir() -> str:
     return tempfile.mkdtemp(prefix="lucy_edge_test_")
 
 
+def local_checkpoint(tmp: str) -> str:
+    """Write a minimal ``local_lucy`` checkpoint file so ``LocalLucyProvider``
+    registers and reports healthy (on-device inference is present).
+
+    The contents are intentionally minimal: routing/health checks only need the
+    file to exist -- real generation requires a fully trained checkpoint (the
+    one honest gap the foundation audit still flags).
+    """
+    cp = Path(tmp) / "lucy_local_checkpoint.json"
+    cp.write_text(
+        json.dumps(
+            {
+                "vocab": 256,
+                "d": 64,
+                "ctx": 64,
+                "L": 2,
+                "ff": 4,
+            }
+        )
+    )
+    return str(cp)
+
+
 def make_services(tmp: str, **kwargs: Any):
     config = make_config(tmp, **kwargs)
     return build_services(config, transport=None, fixed_token="test-token")
-
-
-def make_ollama_online_transport() -> FakeTransport:
-    t = FakeTransport()
-    t.on("GET", "/api/version", {"version": "0.4.7"})
-    t.on("GET", "/api/tags", {"models": []})
-    return t
 
 
 async def wait_until(cond, what: str, timeout: float = 5.0) -> None:

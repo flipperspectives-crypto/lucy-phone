@@ -42,8 +42,6 @@ def create_app(services: LucyEdgeServices) -> web.Application:
     app.router.add_get("/v1/lucy/introspect", _handle_introspect)
     app.router.add_get("/v1/foundation", _handle_foundation)
     app.router.add_get("/v1/grounding", _handle_grounding)
-    app.router.add_get("/v1/remote/hosts", _handle_hosts)
-    app.router.add_post("/v1/remote/hosts/register", _handle_host_register)
     app.router.add_get("/v1/hardware/snapshot", _handle_hardware)
     return app
 
@@ -129,7 +127,7 @@ _INDEX_PAGE = """<!doctype html>
 
 <h3>Chat</h3>
 <div class="row">
-  <select id="provider"><option selected>ollama</option><option>mock</option></select>
+  <select id="provider"><option selected>local_lucy</option><option>mock</option></select>
   <input id="model" value="lucy:latest" placeholder="model">
 </div>
 <textarea id="msg" rows="2" placeholder="message"></textarea>
@@ -445,28 +443,6 @@ async def _handle_grounding(request: web.Request) -> web.StreamResponse:
     if services.grounding is None:
         return web.json_response({"error": "local grounding unavailable"}, status=503)
     return web.json_response(await services.grounding.ground(query))
-
-
-async def _handle_hosts(request: web.Request) -> web.StreamResponse:
-    denied = await _guard(request)
-    if denied:
-        return denied
-    services = _services(request)
-    return web.json_response({"hosts": services.hosts.summary()})
-
-
-async def _handle_host_register(request: web.Request) -> web.StreamResponse:
-    denied = await _guard(request)
-    if denied:
-        return denied
-    services = _services(request)
-    try:
-        raw = await request.json()
-        host = HostState.model_validate(raw.get("host", raw))
-    except Exception as exc:
-        return web.json_response({"error": f"invalid host payload: {exc}"}, status=422)
-    registered = services.hosts.register(host)
-    return web.json_response({"host": services.hosts.to_dict(registered), "status": "REGISTERED"})
 
 
 async def _handle_hardware(request: web.Request) -> web.StreamResponse:

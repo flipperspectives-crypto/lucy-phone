@@ -134,11 +134,9 @@ class ClientEndToEndTests(unittest.IsolatedAsyncioTestCase):
         status = await self.edge.task_status(run_id)
         self.assertIn("state", status)
 
-    async def test_evidence_and_hosts_via_client(self):
+    async def test_evidence_via_client(self):
         evidence = await self.edge.evidence(limit=5)
         self.assertIn("records", evidence)
-        hosts = await self.edge.remote_hosts()
-        self.assertIn("hosts", hosts)
 
     async def test_client_does_not_start_ollama(self):
         # The client's surface is control-plane only; it has no method that

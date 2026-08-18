@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from ..config import DEFAULT_OLLAMA_HOST, LucyEdgeConfig
+from ..config import LucyEdgeConfig
 from .base import BaseProvider, CapabilityUnavailable, ProviderError
 from .mock import MockProvider
-from .ollama import OllamaProvider
 
 
 class ProviderRegistry:
@@ -64,17 +63,21 @@ def build_default_registry(
 ) -> ProviderRegistry:
     """Build the provider registry from configuration.
 
-    Phone-only, on-device design: inference runs locally on the device.  The
-    trained-from-scratch TinyTransformer (``local_lucy``) is registered as a real
-    (non-simulated) provider whenever a local checkpoint is wired in via
-    ``config.training.checkpoint_path``.  ``mock`` is always available as the
-    safe fallback.  Ollama is NOT registered by default — external LLM inference
-    is out of scope for the phone-only design (no public cloud, no remote
-    inference).  It is only registered if explicitly configured, and is never
-    the default.
+    Sovereign, phone-only, on-device design: the ONLY inference provider is the
+    locally trained TinyTransformer (``local_lucy``).  It is registered as a
+    real (non-simulated) provider whenever a local checkpoint is wired in via
+    ``config.training.checkpoint_path``.
+
+    ``mock`` is NOT a fallback.  It is only registered when the operator
+    explicitly enables generation via the mock provider
+    (``routing.allow_mock_generation``) for diagnostics/tests.  If no local
+    checkpoint is available and mock generation is disabled, the registry is
+    empty and any inference request fails closed.
+
+    Remote / Ollama inference is out of scope: there is no public cloud and no
+    remote LLM.  ``OllamaProvider`` is not registered here.
     """
     registry = ProviderRegistry()
-    registry.register(MockProvider())
 
     # On-device inference: the locally trained Lucy model.  Lazy import keeps
     # lucy_edge independent of the standalone training package when no
@@ -90,20 +93,8 @@ def build_default_registry(
         except Exception:
             pass
 
-    # Ollama is opt-in only: registered when an explicit (non-default) base URL
-    # is configured or a transport is supplied.  The default localhost host is
-    # NOT registered, keeping inference strictly phone-local / on-device per the
-    # original design (no remote/external LLM inference).
-    if transport is not None or (
-        config.providers.ollama_base_url
-        and config.providers.ollama_base_url != DEFAULT_OLLAMA_HOST
-    ):
-        registry.register(
-            OllamaProvider(
-                base_url=config.providers.ollama_base_url,
-                transport=transport,
-                request_timeout=config.providers.request_timeout,
-                connect_timeout=config.providers.connect_timeout,
-            )
-        )
+    # Mock is opt-in only (never a silent fallback for real inference).
+    if config.routing.allow_mock_generation:
+        registry.register(MockProvider())
+
     return registry

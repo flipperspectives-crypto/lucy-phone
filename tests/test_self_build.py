@@ -1,9 +1,9 @@
 """Self-build tests: Lucy builds herself from her own foundation, not the clouds.
 
 These tests pin down that Lucy Edge constructs every layer of her own runtime
-from local building blocks -- her own synthetic/mock provider, her own loopback
-Ollama endpoint, her own on-disk memory and evidence stores, her own registered
-hosts -- and that none of her self-build path ever reaches for a cloud service.
+from local building blocks -- her own on-device synthetic provider, her own
+on-disk memory and evidence stores -- and that none of her self-build path ever
+reaches for a cloud or remote inference service.
 """
 
 from __future__ import annotations
@@ -13,10 +13,9 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from lucy_edge.config import RemoteHostConfig
 from lucy_edge.evidence.schema import EvidenceRecord, EvidenceType
 from lucy_edge.memory.schema import MemoryRecord, MemoryType, ProvenanceCategory
-from lucy_edge.routing.hosts import HostRole, HostState, HostStatus
+from lucy_edge.routing.hosts import HostRole
 from lucy_edge.routing.policy import ReasonCode, RoutingDecision, RoutingRequest
 from lucy_edge.services import build_services
 
@@ -40,7 +39,6 @@ def assert_local_only(urls: list[tuple[str, str]]) -> None:
 
 def collect_urls(config) -> list[tuple[str, str]]:
     urls = [
-        ("providers.ollama_base_url", config.providers.ollama_base_url),
         ("gateway.host", f"http://{config.gateway.host}:{config.gateway.port}"),
         (
             "phone_client.gateway",
@@ -48,26 +46,21 @@ def collect_urls(config) -> list[tuple[str, str]]:
             f"{config.phone_client.gateway_host}:{config.phone_client.gateway_port}",
         ),
     ]
-    for index, host in enumerate(config.remote_hosts):
-        if host.base_url:
-            urls.append((f"remote_hosts[{index}].base_url", host.base_url))
     return urls
 
 
 class SelfBuildFoundationTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_foundation_is_local_first(self):
         config = make_config(temp_dir())
-        self.assertEqual(config.providers.default_provider, "mock")
-        self.assertEqual(config.providers.ollama_base_url, "http://127.0.0.1:11434")
+        self.assertEqual(config.providers.default_provider, "local_lucy")
         self.assertEqual(config.gateway.host, "127.0.0.1")
         self.assertEqual(config.phone_client.gateway_host, "127.0.0.1")
-        self.assertEqual(config.remote_hosts, [])
         assert_local_only(collect_urls(config))
 
     async def test_build_registers_only_self_providers(self):
         services = build_services(make_config(temp_dir()), transport=FakeTransport())
         try:
-            self.assertEqual(services.providers.names(), ["mock", "ollama"])
+            self.assertEqual(services.providers.names(), ["mock"])
             for provider in services.providers.all():
                 base_url = getattr(provider, "base_url", None)
                 if base_url is not None:
@@ -84,7 +77,7 @@ class SelfBuildFoundationTests(unittest.IsolatedAsyncioTestCase):
         await services.open()
         try:
             report = await services.introspection.report()
-            self.assertEqual(report["inference"]["default_provider"], "mock")
+            self.assertEqual(report["inference"]["default_provider"], "local_lucy")
 
             result = await services.router.route(
                 RoutingRequest(model="qwen3:1.7b", provider="mock", host_role=HostRole.PHONE)
@@ -148,7 +141,6 @@ class SelfBuildFoundationTests(unittest.IsolatedAsyncioTestCase):
         cloud_guard = FakeTransport(
             fail_with=AssertionError("phone-only mode reached the network / cloud")
         )
-        config.providers.ollama_base_url = "http://127.0.0.1:11434"
         services = build_services(config, transport=cloud_guard)
         await services.open()
         try:
@@ -169,41 +161,6 @@ class SelfBuildFoundationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cloud_host.decision, RoutingDecision.DENY)
             self.assertEqual(cloud_host.reason_code, ReasonCode.UNKNOWN_REMOTE_HOST)
             self.assertEqual(cloud_guard.calls, [])
-        finally:
-            await services.close()
-
-    async def test_configured_host_is_unknown_until_it_registers_itself(self):
-        config = make_config(temp_dir())
-        config.remote_hosts = [
-            RemoteHostConfig(
-                host_id="laptop",
-                hostname="LAPTOP",
-                role="LAPTOP",
-                provider="ollama",
-                base_url="http://192.168.1.50:11434",
-            )
-        ]
-        assert_local_only(collect_urls(config))
-        services = build_services(config)
-        try:
-            host = services.hosts.get("laptop")
-            self.assertIsNotNone(host)
-            self.assertEqual(host.status, HostStatus.UNKNOWN)
-            self.assertFalse(host.is_usable)
-            self.assertIsNone(host.registered_at)
-
-            services.hosts.register(
-                HostState(
-                    host_id="laptop",
-                    role=HostRole.LAPTOP,
-                    provider="ollama",
-                    base_url="http://192.168.1.50:11434",
-                )
-            )
-            registered = services.hosts.get("laptop")
-            self.assertEqual(registered.status, HostStatus.REGISTERED)
-            self.assertTrue(registered.is_usable)
-            self.assertIsNotNone(registered.registered_at)
         finally:
             await services.close()
 
@@ -250,7 +207,7 @@ class SelfBuildFoundationTests(unittest.IsolatedAsyncioTestCase):
         await services.open()
         try:
             report = await services.introspection.report()
-            self.assertEqual(report["inference"]["default_provider"], "mock")
+            self.assertEqual(report["inference"]["default_provider"], "local_lucy")
             # Phone-only, on-device design: no external/remote LLM is registered
             # by default. The locally trained TinyTransformer (local_lucy) appears
             # here only when a real checkpoint is wired in (see the test below).

@@ -99,54 +99,10 @@ class LucyEdgeServices:
             await self.memory.open()
         if self.evidence is not None:
             await self.evidence.open()
-        await self._probe_remote_hosts()
         if self.mcp_registry is not None and self.mcp_registry.enabled:
             await self.mcp_registry.open()
             self._register_mcp_tools()
         self._open = True
-
-    async def _probe_remote_hosts(self) -> None:
-        """Probe configured remote hosts and register only the healthy ones.
-
-        A host listed in ``config.remote_hosts`` starts as UNKNOWN.  We perform
-        a real, lightweight Ollama health check (GET /api/version) against the
-        host's ``base_url``; only on success do we promote it to REGISTERED via
-        the existing HostRegistry.register() API.  Unreachable hosts are left
-        UNKNOWN so the router refuses to trust them (never trust config alone).
-        """
-        if self.hosts is None:
-            return
-        from .providers.ollama import OllamaProvider
-
-        for host_cfg in self.config.remote_hosts:
-            base_url = host_cfg.base_url
-            if not base_url:
-                continue
-            # Skip localhost: the ARM guard handles that via routing policy.
-            try:
-                provider = OllamaProvider(
-                    base_url=base_url, transport=self._transport
-                )
-                health = await provider.health()
-            except Exception:
-                health = None
-            if health is not None and health.ok:
-                from .routing.hosts import HostState, HostStatus
-
-                state = HostState(
-                    host_id=host_cfg.host_id,
-                    hostname=host_cfg.hostname,
-                    role=HostRole(host_cfg.role)
-                    if host_cfg.role in HostRole.__members__
-                    else HostRole.UNKNOWN,
-                    status=HostStatus.REGISTERED,
-                    provider=host_cfg.provider,
-                    base_url=base_url,
-                    models=list(health.models),
-                    registered_at=__import__("time").time(),
-                    last_heartbeat=__import__("time").time(),
-                )
-                self.hosts.register(state)
 
     async def close(self) -> None:
         if not self._open:
@@ -261,11 +217,7 @@ def build_services(
     workspace = workspace or base_dir
 
     providers = build_default_registry(config, transport=transport)
-    hosts = HostRegistry(
-        known=[h.model_dump() for h in config.remote_hosts]
-        if config.remote_hosts
-        else None
-    )
+    hosts = HostRegistry()
 
     memory = MemoryStore(config.resolve(config.memory.db_path))
     retrieval = RetrievalEngine(memory)

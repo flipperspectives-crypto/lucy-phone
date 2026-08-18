@@ -31,15 +31,12 @@ class LucyIntrospection:
         memory = caps["memory"]
         inference = caps["inference"]
         tools = caps["tools"]
-        remote_hosts = inference["remote_hosts"]
         return {
             "persistent_memory_available": memory["persistent_memory_available"],
             "retrieval_available": memory["retrieval_available"],
             "git_tool_available": "git.status" in tools["names"],
-            "remote_inference_available": any(h["registered"] for h in remote_hosts),
-            "remote_host_offline": any(
-                h["status"] == "OFFLINE" for h in remote_hosts
-            ),
+            "remote_inference_available": False,
+            "remote_host_offline": False,
             "phone_local_inference_blocked": (
                 caps["inference"]["phone_local_inference_enabled"] is False
             ),

@@ -5,8 +5,6 @@ Environment variables follow the NEXUS_* conventions:
 
     NEXUS_LUCY_GATEWAY_HOST
     NEXUS_LUCY_GATEWAY_PORT
-    NEXUS_OLLAMA_URL       (full Ollama base URL, e.g. http://192.168.1.42:11434)
-    NEXUS_OLLAMA_HOST      (legacy host-only override)
     NEXUS_HOST_ROLE        (PHONE | LAPTOP | RTX4060 | UNKNOWN)
     NEXUS_HOST_ID
     NEXUS_PHONE_LOCAL_INFERENCE_ENABLED
@@ -25,7 +23,6 @@ from pydantic import BaseModel, Field
 from .version import __version__
 
 DEFAULT_HOST_ROLE = "PHONE"
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_DATA_DIR = "data"
 
 
@@ -77,16 +74,15 @@ class GatewayConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
-    default_provider: str = "mock"
-    ollama_base_url: str = DEFAULT_OLLAMA_HOST
-    # Total time budget for a single inference response.  120s is appropriate
-    # for remote Ollama (e.g. a Windows laptop) where cold model loads and
-    # large context can exceed 30s.  Connection establishment is governed
-    # separately by connect_timeout (fail-fast).
+    # The sovereign runtime has exactly one inference provider: the locally
+    # trained TinyTransformer (``local_lucy``).  No cloud, no remote Ollama,
+    # no fallback provider.  ``mock`` is never the default and is only ever
+    # registered when ``routing.allow_mock_generation`` is explicitly enabled.
+    default_provider: str = "local_lucy"
+    # Total time budget for a single on-device inference response.
     request_timeout: float = 120.0
-    # Fail-fast ceiling for establishing the TCP/TLS connection to the
-    # Ollama HTTP endpoint.  Kept short so an unreachable host fails quickly
-    # without waiting the full request_timeout.
+    # Fail-fast ceiling for establishing a connection to the on-device
+    # inference runtime.
     connect_timeout: float = 5.0
     stream_chunk_timeout: float = 5.0
 
@@ -136,22 +132,6 @@ class AgentConfig(BaseModel):
     #            through ModelRouter, which denies local inference and falls
     #            back to the mock provider — so NO real model runs on phone.
     planner_backend: str = "rule"
-
-
-class RemoteHostConfig(BaseModel):
-    """A remote inference host that has been configured.
-
-    No host is ever marked REGISTERED or ONLINE merely because it is listed
-    here; presence in config is UNKNOWN until a real heartbeat registers it.
-    """
-
-    host_id: str
-    hostname: str = ""
-    role: str = "LAPTOP"
-    provider: str = "ollama"
-    base_url: Optional[str] = None
-    base_url_env: Optional[str] = None
-    enabled: bool = True
 
 
 class IntrospectionConfig(BaseModel):
@@ -225,7 +205,6 @@ class LucyEdgeConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
-    remote_hosts: list[RemoteHostConfig] = Field(default_factory=list)
     introspection: IntrospectionConfig = Field(default_factory=IntrospectionConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     phone_client: PhoneClientConfig = Field(default_factory=PhoneClientConfig)
@@ -244,16 +223,6 @@ _ENV_OVERRIDES: dict[str, tuple[str, Any]] = {
     "NEXUS_HOST_ROLE": ("host_role", str),
     "NEXUS_LUCY_GATEWAY_HOST": ("gateway.host", str),
     "NEXUS_LUCY_GATEWAY_PORT": ("gateway.port", int),
-    # NEXUS_OLLAMA_URL sets the full Ollama base URL (scheme + host + port).
-    # Use this to point Lucy at a remote Ollama on your Windows laptop, e.g.:
-    #   NEXUS_OLLAMA_URL=http://10.202.5.66:11434
-    # NEXUS_OLLAMA_HOST is the legacy host-only override (kept for compat).
-    "NEXUS_OLLAMA_URL": ("providers.ollama_base_url", str),
-    "NEXUS_OLLAMA_HOST": ("providers.ollama_base_url", str),
-    # NEXUS_OLLAMA_REQUEST_TIMEOUT sets the per-response budget (default 120s).
-    "NEXUS_OLLAMA_REQUEST_TIMEOUT": ("providers.request_timeout", float),
-    # NEXUS_OLLAMA_CONNECT_TIMEOUT sets the fail-fast connect ceiling (default 5s).
-    "NEXUS_OLLAMA_CONNECT_TIMEOUT": ("providers.connect_timeout", float),
     "NEXUS_PHONE_LOCAL_INFERENCE_ENABLED": ("phone.phone_local_inference_enabled", bool),
     # NEXUS_PHONE_LOCAL_INFERENCE_UNLOCKED unlocks the ARM fail-closed guard.
     # Required (with PHONE_LOCAL_INFERENCE_ENABLED) to run local inference on

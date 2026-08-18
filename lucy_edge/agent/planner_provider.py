@@ -6,16 +6,15 @@ tools.  The interface is deliberately synchronous to match the planner's
 
 Phone safety
 ------------
-``MockPlannerProvider`` is the phone-safe default: it returns a bounded,
-deterministic plan with NO model inference, NO thermal impact, and NO network.
-It is used whenever the host role is PHONE (``phone_local_inference_enabled``
-defaults to FALSE).
+``MockPlannerProvider`` is a deterministic, phone-safe planner: it returns a
+bounded plan with NO model inference, NO thermal impact, and NO network.  It is
+used by the rule-based planner (the default) and for diagnostics.
 
-``ModelPlannerProvider`` calls a real language model, but ONLY after the
-``ModelRouter`` authorises the planning-model request.  On a phone with local
-inference disabled the router denies the request and the provider transparently
-falls back to ``MockPlannerProvider``.  This class must therefore NEVER bypass
-the routing policy or the thermal governor.
+``ModelPlannerProvider`` calls the LOCAL TinyTransformer, but ONLY after the
+``ModelRouter`` authorises the planning-model request.  If the router denies the
+request or the local provider is unavailable, planning FAILS CLOSED — it never
+silently substitutes a mock plan.  This class must NEVER bypass the routing
+policy or the thermal governor.
 """
 
 from __future__ import annotations
@@ -171,13 +170,12 @@ _PROVIDER_KEYWORDS = [
 
 
 class ModelPlannerProvider(PlannerProvider):
-    """Real model-driven provider.
+    """Real model-driven provider (sovereign, local-only).
 
-    Calls a language model to generate a plan, but ONLY after the
-    ``ModelRouter`` authorises the planning-model request.  On a phone with
-    local inference disabled the router denies the request and the provider
-    transparently falls back to ``MockPlannerProvider``.  JSON output is parsed
-    and every step is validated against ``available_tools``.
+    Calls the local TinyTransformer to generate a plan, but ONLY after the
+    ``ModelRouter`` authorises the planning-model request.  If the router
+    denies the request, or the local provider is unavailable, planning FAILS
+    CLOSED (raises) — it never silently substitutes a mock plan.
     """
 
     name = "model"
@@ -186,28 +184,7 @@ class ModelPlannerProvider(PlannerProvider):
         self.config = config
         self.router = router
         self.providers = providers
-        self._fallback = MockPlannerProvider()
         self._planning_model = config.routing.default_model
-
-    def _resolve_target_host(self) -> Optional[str]:
-        """Resolve the routing target host for remote inference.
-
-        When the configured Ollama URL is remote (not localhost/loopback) and
-        matches a configured remote host, return that host's ID so the ARM
-        guard allows the request (target_host is not None).  Returns None for
-        localhost URLs (ARM guard blocks → safe fallback to mock) or when no
-        matching remote host is configured.
-        """
-        from ..routing.policy import _is_localhost_url
-
-        ollama_url = (self.config.providers.ollama_base_url or "").rstrip("/")
-        if not ollama_url or _is_localhost_url(ollama_url):
-            return None
-        for host in getattr(self.config, "remote_hosts", []) or []:
-            host_url = (host.base_url or "").rstrip("/")
-            if host_url and host_url == ollama_url:
-                return host.host_id
-        return None
 
     def generate_plan(
         self,
@@ -216,10 +193,9 @@ class ModelPlannerProvider(PlannerProvider):
         limits: AgentLimits,
         tool_schemas: Optional[list[dict[str, Any]]] = None,
     ) -> Plan:
-        try:
-            return self._try_model_plan(goal, available_tools, limits, tool_schemas)
-        except Exception:
-            return self._fallback.generate_plan(goal, available_tools, limits, tool_schemas)
+        # Fail closed: any routing denial, missing provider, or model error is
+        # surfaced as an exception.  We never silently substitute a mock plan.
+        return self._try_model_plan(goal, available_tools, limits, tool_schemas)
 
     def _try_model_plan(
         self,
@@ -228,14 +204,12 @@ class ModelPlannerProvider(PlannerProvider):
         limits: AgentLimits,
         tool_schemas: Optional[list[dict[str, Any]]] = None,
     ) -> Plan:
+        from ..providers.base import ProviderError
         from ..routing.hosts import HostRole
         from ..routing.policy import RoutingDecision, RoutingRequest
 
-        # When the configured Ollama URL is remote and matches a configured
-        # remote host, supply that host as the routing target.  This lets the
-        # ARM guard allow the request (target_host is not None) so planning
-        # can route to the Windows laptop instead of falling back to mock.
-        target_host = self._resolve_target_host()
+        # Sovereign planning runs on the local device only.  No remote host is
+        # ever targeted — there is no external/remote inference.
         request = RoutingRequest(
             model=self._planning_model,
             provider=self.config.providers.default_provider,
@@ -245,19 +219,24 @@ class ModelPlannerProvider(PlannerProvider):
                 else HostRole.UNKNOWN
             ),
             host_id=self.config.host_id,
-            target_host=target_host,
+            target_host=None,
         )
 
         result = self._run(self.router.route(request))
-        # ROUTE is the router's successful decision for remote-host routing
-        # (REMOTE_HOST_SELECTED); ALLOW is the success decision for local/non-phone
-        # inference.  Both must proceed to the LLM; anything else is a denial.
-        if result.decision not in (RoutingDecision.ALLOW, RoutingDecision.ROUTE):
-            return self._fallback.generate_plan(goal, available_tools, limits, tool_schemas)
+        # ROUTE only occurs for remote-host routing, which is disabled in the
+        # sovereign runtime; treat anything other than ALLOW as a denial.
+        if result.decision != RoutingDecision.ALLOW:
+            raise ProviderError(
+                f"model planning denied by routing policy: "
+                f"{result.reason_code.value} ({result.message})"
+            )
 
         provider = self.providers.get(request.provider)
         if provider is None:
-            return self._fallback.generate_plan(goal, available_tools, limits, tool_schemas)
+            raise ProviderError(
+                f"inference provider '{request.provider}' is not registered; "
+                f"cannot plan without a local model"
+            )
 
         prompt = self._build_prompt(goal, available_tools, limits, tool_schemas)
         response = self._run(

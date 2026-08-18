@@ -139,13 +139,6 @@ class LucyEdgeClient:
         ) as resp:
             return await resp.json()
 
-    async def remote_hosts(self) -> dict[str, Any]:
-        session = await self._session_get()
-        async with session.get(
-            f"{self.base_url}/v1/remote/hosts", headers=self._headers()
-        ) as resp:
-            return await resp.json()
-
     async def hardware_snapshot(self) -> dict[str, Any]:
         session = await self._session_get()
         async with session.get(
@@ -164,7 +157,6 @@ class LucyEdgeClient:
             "task_status",
             "evidence",
             "introspect",
-            "remote_hosts",
             "hardware_snapshot",
         }
     )

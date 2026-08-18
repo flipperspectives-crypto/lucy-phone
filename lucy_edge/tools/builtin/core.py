@@ -35,7 +35,7 @@ async def _system_health(**kw: Any) -> dict[str, Any]:
         "host_id": context.config.host_id if context.config else None,
         "memory_records": memory_count,
         "evidence_records": evidence_count,
-        "remote_hosts": [h.host_id for h in hosts],
+        "remote_hosts": [],
         "providers": provider_summary,
         "phone_local_inference_enabled": (
             context.config.phone.phone_local_inference_enabled if context.config else None

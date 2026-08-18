@@ -26,10 +26,10 @@ from lucy_edge.routing.policy import (
 )
 from lucy_edge.services import build_services
 
-from .helpers import FakeTransport, make_config, temp_dir
+from .helpers import FakeTransport, local_checkpoint, make_config, temp_dir
 
 
-def _request(model="qwen3:1.7b", provider="ollama", role=HostRole.PHONE, target=None, resources=None):
+def _request(model="qwen3:1.7b", provider="local_lucy", role=HostRole.PHONE, target=None, resources=None):
     return RoutingRequest(
         model=model,
         provider=provider,
@@ -96,7 +96,9 @@ class PhonePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.model_class, ModelClass.LUCY_7B_CLASS)
 
     async def test_declared_small_lucy_runs_phone_local(self):
-        config = make_config(temp_dir(), phone_local_inference=True)
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
         config.routing.known_sizes = {"lucy": 1.7}
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})
@@ -122,7 +124,9 @@ class PhonePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason_code, ReasonCode.MOCK_PROVIDER_SELECTED)
 
     async def test_remote_host_routing_represented(self):
-        config = make_config(temp_dir(), phone_local_inference=True)
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})
         services = build_services(config, transport=transport)
@@ -131,7 +135,7 @@ class PhonePolicyTests(unittest.IsolatedAsyncioTestCase):
                 host_id="laptop-01",
                 role=HostRole.LAPTOP,
                 status=HostStatus.REGISTERED,
-                provider="ollama",
+                provider="local_lucy",
             )
         )
         result = await services.router.route(_request(target="laptop-01"))
@@ -158,14 +162,16 @@ class PhonePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason_code, ReasonCode.THERMAL_UNKNOWN)
 
     async def test_phone_local_inference_allowed_when_safe(self):
-        config = make_config(temp_dir(), phone_local_inference=True)
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})
         services = build_services(config, transport=transport)
         result = await services.router.route(_request(resources=_cool_snapshot()))
         self.assertEqual(result.decision, RoutingDecision.ALLOW)
         self.assertEqual(result.reason_code, ReasonCode.OK)
-        self.assertEqual(result.provider, "ollama")
+        self.assertEqual(result.provider, "local_lucy")
         self.assertIsNone(result.target_host)
         self.assertIn("phone-local", result.message)
 
@@ -261,9 +267,6 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
             phone_local_inference=True,
             phone_local_inference_unlocked=False,
         )
-        # Point URL at a remote host so this test exercises the general ARM
-        # guard (target_host=None) rather than the localhost-URL sub-case.
-        config.providers.ollama_base_url = "http://10.202.5.66:11434"
         services = build_services(config)
         result = await services.router.route(
             _request(model="qwen3:1.7b", resources=_cool_snapshot())
@@ -278,7 +281,9 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
 
         if not _is_arm_host():
             self.skipTest("Not on ARM host; guard not active")
-        config = make_config(temp_dir(), phone_local_inference=True)
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
         config.phone.local_inference_unlocked = True
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})
@@ -291,14 +296,14 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_arm_guard_does_not_block_remote_routing(self):
         """Routing to a remote host is NOT blocked by the ARM guard,
         even when local_inference_unlocked is false. This is the intended
-        way to use a phone with a laptop's Ollama."""
+        way to use a phone with a laptop's Lucy host."""
+        tmp = temp_dir()
         config = make_config(
-            temp_dir(),
+            tmp,
             phone_local_inference=True,
             phone_local_inference_unlocked=False,
         )
-        # Point Ollama at a remote host (the Windows laptop), not loopback.
-        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.training.checkpoint_path = local_checkpoint(tmp)
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})
         services = build_services(config, transport=transport)
@@ -307,7 +312,7 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
                 host_id="laptop-01",
                 role=HostRole.LAPTOP,
                 status=HostStatus.REGISTERED,
-                provider="ollama",
+                provider="local_lucy",
             )
         )
         result = await services.router.route(
@@ -323,7 +328,9 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
 
         if _is_arm_host():
             self.skipTest("On ARM host; cannot test non-ARM path here")
-        config = make_config(temp_dir(), phone_local_inference=True)
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})
         services = build_services(config, transport=transport)
@@ -343,53 +350,19 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
         else:
             self.assertFalse(_is_arm_host())
 
-    async def test_is_localhost_url(self):
-        """_is_localhost_url recognizes loopback addresses."""
-        from lucy_edge.routing.policy import _is_localhost_url
-
-        self.assertTrue(_is_localhost_url("http://127.0.0.1:11434"))
-        self.assertTrue(_is_localhost_url("http://localhost:11434"))
-        self.assertTrue(_is_localhost_url("http://[::1]:11434"))
-        self.assertTrue(_is_localhost_url("127.0.0.1:11434"))
-        self.assertFalse(_is_localhost_url("http://10.202.5.66:11434"))
-        self.assertFalse(_is_localhost_url("http://192.168.1.42:11434"))
-        self.assertFalse(_is_localhost_url("http://laptop-01:11434"))
-
-    async def test_arm_localhost_url_guard_blocks_loopback(self):
-        """On ARM, if Ollama URL is localhost, inference is denied
-        (unless unlocked) — even with phone_local_inference_enabled=true."""
-        from lucy_edge.routing.policy import _is_arm_host, _is_localhost_url
-
-        if not _is_arm_host():
-            self.skipTest("Not on ARM host; guard not active")
-        config = make_config(
-            temp_dir(),
-            phone_local_inference=True,
-            phone_local_inference_unlocked=False,
-        )
-        # Default ollama_base_url is http://127.0.0.1:11434 (localhost)
-        self.assertTrue(_is_localhost_url(config.providers.ollama_base_url))
-        services = build_services(config)
-        result = await services.router.route(
-            _request(model="qwen3:1.7b", resources=_cool_snapshot())
-        )
-        self.assertEqual(result.decision, RoutingDecision.DENY)
-        self.assertEqual(
-            result.reason_code, ReasonCode.ARM_LOCALHOST_INFERENCE_LOCKED
-        )
-
     async def test_arm_localhost_guard_bypassed_for_remote_url(self):
-        """On ARM, if Ollama URL points to a remote host, the localhost
-        guard does NOT block (the existing ARM/target_host guard may still
-        apply, but the localhost-specific reason must not fire)."""
+        """On ARM, routing to a registered remote host is not blocked by the
+        local-inference guard when local_inference_unlocked is false; the
+        remote-host branch handles it."""
         from lucy_edge.routing.policy import _is_arm_host
 
+        tmp = temp_dir()
         config = make_config(
-            temp_dir(),
+            tmp,
             phone_local_inference=True,
             phone_local_inference_unlocked=False,
         )
-        config.providers.ollama_base_url = "http://10.202.5.66:11434"
+        config.training.checkpoint_path = local_checkpoint(tmp)
         services = build_services(config)
         # Route to a registered remote host — should succeed (not blocked by
         # localhost guard since URL is remote).
@@ -398,7 +371,7 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
                 host_id="laptop-01",
                 role=HostRole.LAPTOP,
                 status=HostStatus.REGISTERED,
-                provider="ollama",
+                provider="local_lucy",
             )
         )
         transport = FakeTransport()
@@ -410,7 +383,7 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
                 host_id="laptop-01",
                 role=HostRole.LAPTOP,
                 status=HostStatus.REGISTERED,
-                provider="ollama",
+                provider="local_lucy",
             )
         )
         result = await services.router.route(_request(target="laptop-01"))
@@ -424,11 +397,13 @@ class ArmFailClosedGuardTests(unittest.IsolatedAsyncioTestCase):
 
         if not _is_arm_host():
             self.skipTest("Not on ARM host; guard not active")
+        tmp = temp_dir()
         config = make_config(
-            temp_dir(),
+            tmp,
             phone_local_inference=True,
             phone_local_inference_unlocked=True,
         )
+        config.training.checkpoint_path = local_checkpoint(tmp)
         # Default URL is localhost
         transport = FakeTransport()
         transport.on("GET", "/api/version", {"version": "0.4.7"})

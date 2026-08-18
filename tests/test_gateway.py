@@ -7,7 +7,6 @@ import unittest
 from aiohttp.test_utils import TestClient, TestServer
 
 from lucy_edge.gateway.server import TASKS_KEY, create_app
-from lucy_edge.routing.hosts import HostRole, HostState
 
 from .helpers import make_config, temp_dir, wait_until
 from .services_open import open_services
@@ -98,27 +97,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
         body = await resp.json()
         self.assertIn("records", body)
-
-    async def test_host_register(self):
-        host = HostState(
-            host_id="laptop-live",
-            role=HostRole.LAPTOP,
-            platform="win32",
-            gpu_name="GTX 960M",
-            provider="ollama",
-        )
-        resp = await self.client.post(
-            "/v1/remote/hosts/register", json={"host": host.model_dump()}, headers=self.auth
-        )
-        self.assertEqual(resp.status, 200)
-        body = await resp.json()
-        self.assertEqual(body["status"], "REGISTERED")
-
-    async def test_hosts_listing(self):
-        resp = await self.client.get("/v1/remote/hosts", headers=self.auth)
-        self.assertEqual(resp.status, 200)
-        body = await resp.json()
-        self.assertIn("hosts", body)
 
     async def test_hardware_snapshot(self):
         resp = await self.client.get("/v1/hardware/snapshot", headers=self.auth)

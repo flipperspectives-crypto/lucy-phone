@@ -96,8 +96,11 @@ class FoundationGuard:
         if not endpoints:
             return {
                 "id": _CHECK_NO_CLOUD,
-                "status": STATUS_WARN,
-                "detail": "no inference endpoints configured; model readiness is unverified",
+                "status": STATUS_PASS,
+                "detail": (
+                    "no external inference endpoints configured; inference "
+                    "stays on-device (the sovereign default)"
+                ),
                 "endpoints": [],
             }
         flagged: list[dict[str, str]] = []

@@ -15,7 +15,6 @@ import platform
 import re
 from enum import Enum
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -33,20 +32,6 @@ def _is_arm_host() -> bool:
     """
     machine = platform.machine().lower()
     return machine.startswith(("arm", "aarch"))
-
-
-def _is_localhost_url(url: str) -> bool:
-    """True when a URL resolves to localhost / loopback.
-
-    Used by the ARM fail-closed guard to detect when the configured Ollama
-    endpoint is on the phone itself (e.g. 127.0.0.1, ::1, localhost).
-    """
-    try:
-        parsed = urlparse(url if "://" in url else f"http://{url}")
-    except (ValueError, TypeError):
-        return False
-    host = (parsed.hostname or "").lower()
-    return host in ("127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1")
 
 
 class ModelClass(str, Enum):
@@ -158,7 +143,7 @@ def required_ram_bytes(model_class: ModelClass) -> Optional[int]:
 
 class RoutingRequest(BaseModel):
     model: str
-    provider: str = "mock"
+    provider: str = "local_lucy"
     host_role: HostRole = HostRole.PHONE
     host_id: str = "phone"
     target_host: Optional[str] = None  # explicit requested remote host
@@ -231,30 +216,9 @@ class RoutingPolicy:
                 model=request.model,
                 model_class=model_class,
             )
-        # ARM localhost-URL guard (checked first — most specific): if the
-        # configured Ollama base URL resolves to localhost/loopback, the phone
-        # would be using its own Ollama.  Block this on ARM unless explicitly
-        # overridden — the phone should point at a remote host (e.g. a Windows
-        # laptop), not its own loopback.
-        if (
-            self._arm_host
-            and not self.local_inference_unlocked
-            and _is_localhost_url(self.config.providers.ollama_base_url)
-        ):
-            return RoutingResult(
-                decision=RoutingDecision.DENY,
-                reason_code=ReasonCode.ARM_LOCALHOST_INFERENCE_LOCKED,
-                message=(
-                    f"host architecture is {platform.machine()!r} and Ollama base "
-                    f"URL is {self.config.providers.ollama_base_url!r} (localhost): "
-                    "loopback inference on ARM is fail-closed.  Point the URL at a "
-                    "remote host, or set phone.local_inference_unlocked to override."
-                ),
-                model=request.model,
-                model_class=model_class,
-            )
-        # ARM fail-closed guard: only for phone-LOCAL inference (no target_host).
-        # If a remote target is requested, the phone is just routing — allowed.
+        # ARM fail-closed guard: phone-LOCAL inference (no target_host) requires
+        # the operator to explicitly unlock it.  Local inference on ARM is
+        # fail-closed by default to avoid thermal/battery excursions.
         if (
             self._arm_host
             and not self.local_inference_unlocked
