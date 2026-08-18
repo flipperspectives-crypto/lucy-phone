@@ -141,6 +141,79 @@ class FoundationAuditTests(unittest.IsolatedAsyncioTestCase):
         statuses = await self._audit_with_checkpoint(local_checkpoint(tmp))
         self.assertEqual(statuses["model_weights_present"], STATUS_GAP)
 
+    async def test_tampered_checkpoint_gaps_audit(self):
+        import asyncio, json, os, random, tempfile
+
+        from training.train import train
+
+        # A genuinely trained model on a learnable pattern: the probe sequence
+        # (corpus[:ctx]) is actually fit, so a mislabelled/random-weight copy
+        # cannot reproduce the recorded probe_loss and must fail the audit.
+        tmp = tempfile.mkdtemp()
+        try:
+            summary = train(
+                repo_root=".",
+                corpus_text="AB" * 500,
+                checkpoint_dir=os.path.join(tmp, "ck"),
+                steps=100,
+                lr=0.05,
+                ctx=16,
+                d_model=32,
+                n_layers=1,
+                ff_mult=4,
+                seed=1,
+                batch_size=4,
+                stride=2,
+                lineage_db=os.path.join(tmp, "lineage.db"),
+                git_hash="t",
+            )
+            cp = summary["latest"]
+            sd = json.loads(open(cp).read())
+            rnd = random.Random(7)
+
+            def scramble_any(x):
+                if isinstance(x, list) and x and isinstance(x[0], list):
+                    return [[rnd.uniform(-0.1, 0.1) for _ in row] for row in x]
+                if isinstance(x, list) and x and isinstance(x[0], (int, float)):
+                    return [rnd.uniform(-0.1, 0.1) for _ in x]
+                return x
+
+            sd["tok_emb"] = scramble_any(sd["tok_emb"])
+            sd["pos_emb"] = scramble_any(sd["pos_emb"])
+            sd["lnf_gain"] = scramble_any(sd["lnf_gain"])
+            sd["lnf_bias"] = scramble_any(sd["lnf_bias"])
+            for layer in sd["layers"]:
+                for k in ("ln1_gain", "ln1_bias", "Wq", "Wk", "Wv", "Wo", "ln2_gain", "ln2_bias", "W1", "W2"):
+                    layer[k] = scramble_any(layer[k])
+            open(cp, "w").write(json.dumps(sd))
+            statuses = await self._audit_with_checkpoint(cp)
+            self.assertEqual(statuses["model_weights_present"], STATUS_GAP)
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    async def test_mock_is_opt_in_only(self):
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
+        config.routing.allow_mock_generation = False
+        transport = FakeTransport()
+        transport.on("GET", "/api/version", {"version": "0.4.7"})
+        services = build_services(config, transport=transport)
+        await services.open()
+        try:
+            names = {p.name for p in services.providers.all()}
+            self.assertNotIn("mock", names)
+        finally:
+            await services.close()
+
+    def test_production_yaml_disables_mock(self):
+        from pathlib import Path
+
+        text = Path("lucy.yaml").read_text()
+        self.assertIn("allow_mock_generation: false", text)
+
 
 class LocalGroundingTests(unittest.IsolatedAsyncioTestCase):
     async def _services(self):

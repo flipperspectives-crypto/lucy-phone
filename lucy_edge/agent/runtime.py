@@ -327,7 +327,7 @@ class AgentRuntime:
                     completion_reason=reason,
                     host=host,
                     host_role=host_role,
-                    plan=self._plan.as_dict()["steps"] if self._plan else None,
+                    plan=self._plan.as_dict() if self._plan else None,
                     memory_retrieval_ids=self._memory_retrieval_ids,
                     tool_calls=self._tool_calls_log,
                     permission_decisions=self._permission_log,

@@ -16,6 +16,11 @@ phone:
   phone_local_inference_enabled: true
   local_inference_unlocked: true
 
+routing:
+  # Strict sovereign default: the synthetic "NEXUS SAFE" mock provider is
+  # opt-in only, never registered by default.  Real local inference or nothing.
+  allow_mock_generation: false
+
 training:
   checkpoint_path: training/checkpoints/latest.json
   lineage_db: training/lineage.db

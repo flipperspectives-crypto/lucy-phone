@@ -188,6 +188,7 @@ class FoundationGuard:
         report: dict[str, Any] = {"id": _CHECK_MODEL_WEIGHTS, "providers": {}}
         lucy_trained = False
         lucy_untrained = False
+        lucy_integrity_failed = False
         for provider in self.services.providers.all():
             if getattr(provider, "simulated", False):
                 continue
@@ -211,6 +212,7 @@ class FoundationGuard:
             # placeholder: the checkpoint must carry training metadata.  This is
             # the honest core of the sovereignty claim -- not merely a file name.
             training_status: Optional[str] = None
+            integrity_ok = True
             ckpt = getattr(provider, "checkpoint_path", None)
             if ckpt:
                 try:
@@ -218,7 +220,14 @@ class FoundationGuard:
                 except Exception:
                     training_status = None
             if has_lucy and training_status == "AVAILABLE":
-                lucy_trained = True
+                # tamper-evident: weights must reproduce the recorded probe loss
+                sc = getattr(provider, "self_check", None)
+                if callable(sc) and not sc():
+                    integrity_ok = False
+                    training_status = "INTEGRITY_FAILED"
+                    lucy_integrity_failed = True
+                else:
+                    lucy_trained = True
             elif has_lucy:
                 lucy_untrained = True
             report["providers"][provider.name] = {
@@ -231,6 +240,13 @@ class FoundationGuard:
         if lucy_trained:
             report["status"] = STATUS_PASS
             report["detail"] = "her model is present and trained in the local registry"
+        elif lucy_integrity_failed:
+            report["status"] = STATUS_GAP
+            report["detail"] = (
+                "a local model entry is present and labelled trained, but its "
+                "weights fail the integrity self-check (claimed training loss not "
+                "reproduced) -- treat as unverified, not sovereign"
+            )
         elif lucy_untrained:
             report["status"] = STATUS_GAP
             report["detail"] = (

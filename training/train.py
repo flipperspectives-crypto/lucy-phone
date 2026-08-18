@@ -34,6 +34,22 @@ def _window_corpus(token_ids: list[int], ctx: int, stride: int) -> list[list[int
     return seqs
 
 
+def _sequence_loss(m: "TinyTransformer", seq: list[int]) -> float:
+    """Cross-entropy of the model on a single next-token sequence."""
+    if len(seq) < 2:
+        return 0.0
+    logits, _ = m.forward([seq[:-1]])
+    loss, _ = m.cross_entropy(logits, [seq[1:]])
+    return loss
+
+
+def _val_loss(m: "TinyTransformer", val_seqs: list[list[int]], n: int = 8) -> Optional[float]:
+    if not val_seqs:
+        return None
+    sample = val_seqs[:n]
+    return sum(_sequence_loss(m, s) for s in sample) / len(sample)
+
+
 def train(
     repo_root: str | Path = ".",
     checkpoint_dir: str | Path = "training/checkpoints",
@@ -68,10 +84,24 @@ def train(
     if not token_ids:
         raise RuntimeError("corpus is empty; nothing to train on")
 
-    seqs = _window_corpus(token_ids, ctx, stride)
+    # Deterministic held-out split (last 10%) for an honest generalization
+    # signal -- training and evaluation never share these tokens.
+    split = max(1, int(len(token_ids) * 0.9))
+    train_ids = token_ids[:split]
+    val_ids = token_ids[split:]
+    seqs = _window_corpus(train_ids, ctx, stride)
+    val_seqs = _window_corpus(val_ids, ctx, stride)
     if not seqs:
-        # corpus shorter than ctx: pad with a single short sequence
-        seqs = [token_ids[:ctx] if len(token_ids) >= ctx else token_ids + [0] * (ctx - len(token_ids))]
+        seqs = [train_ids[:ctx] if len(train_ids) >= ctx else train_ids + [0] * (ctx - len(train_ids))]
+    if not val_seqs:
+        val_seqs = [val_ids[:ctx] if len(val_ids) >= ctx else val_ids + [0] * (ctx - len(val_ids))]
+
+    # Fixed integrity probe (deterministic) stored in the checkpoint so the audit
+    # can later verify the saved weights actually produce this loss -- a
+    # tamper-evident check that the model really was trained, not just labelled.
+    probe_seq = (
+        token_ids[:ctx] if len(token_ids) >= ctx else token_ids + [0] * (ctx - len(token_ids))
+    )
 
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +139,7 @@ def train(
         losses = []
         best_loss = float("inf")
         best_sd = None
+        best_probe_loss = None
         for step in range(steps):
             batch = [rng.choice(seqs) for _ in range(batch_size)]
             # next-token targets: drop the first token as a target and the last
@@ -122,6 +153,7 @@ def train(
             if loss < best_loss:
                 best_loss = loss
                 best_sd = json.loads(json.dumps(m.state_dict()))
+                best_probe_loss = _sequence_loss(m, probe_seq)
             m.backward(batch_x, logits, cache, dlogits)
             for name, g in m.grad.items():
                 p = m.params[name]
@@ -140,19 +172,25 @@ def train(
         if best_sd is None:
             best_sd = m.state_dict()
             best_loss = final_loss
+            best_probe_loss = _sequence_loss(m, probe_seq)
+        val_loss = _val_loss(m, val_seqs)
         # persist the BEST checkpoint (state_dict + training metadata), and a
         # per-run file whose path is recorded in the lineage ledger.
         best_sd["trained_steps"] = steps
         best_sd["final_loss"] = best_loss
+        best_sd["probe_seq"] = probe_seq
+        best_sd["probe_loss"] = best_probe_loss
         per_run_path.write_text(json.dumps(best_sd))
         latest_path.write_text(json.dumps(best_sd))
-        ledger.finish_run(run.run_id, STATUS_DONE, final_loss=best_loss, note="ok")
+        note = f"ok; val_loss={val_loss:.4f}" if val_loss is not None else "ok"
+        ledger.finish_run(run.run_id, STATUS_DONE, final_loss=best_loss, note=note)
         return {
             "run_id": run.run_id,
             "checkpoint": str(per_run_path),
             "latest": str(latest_path),
             "final_loss": best_loss,
             "final_loss_last": final_loss,
+            "val_loss": val_loss,
             "steps": steps,
             "git_hash": run.git_hash,
             "data_manifest_sha256": data_sha,

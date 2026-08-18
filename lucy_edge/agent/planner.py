@@ -38,9 +38,18 @@ class PlanStep:
 class Plan:
     goal: str
     steps: list[PlanStep] = field(default_factory=list)
+    # Honesty signal: True when a model-driven plan could not be produced and we
+    # silently degraded to the deterministic RulePlanner.  Surfaced in evidence.
+    degraded: bool = False
+    degradation_note: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {"goal": self.goal, "steps": [s.as_dict() for s in self.steps]}
+        return {
+            "goal": self.goal,
+            "steps": [s.as_dict() for s in self.steps],
+            "degraded": self.degraded,
+            "degradation_note": self.degradation_note,
+        }
 
 
 _GOAL_KEYWORDS: dict[str, tuple[str, str, dict[str, Any], str]] = {
@@ -128,10 +137,20 @@ class ModelDrivenPlanner:
         limits: AgentLimits,
         provider: Any,
         fallback: Optional[RulePlanner] = None,
+        fallback_sink: Optional["Callable[[str], None]"] = None,
     ) -> None:
         self.limits = limits
         self.provider = provider
         self.fallback = fallback or RulePlanner(limits)
+        self.fallback_sink = fallback_sink
+
+    def _degrade(self, goal: str, available_tools: list[str], reason: str) -> Plan:
+        plan = self.fallback.build_plan(goal, available_tools)
+        plan.degraded = True
+        plan.degradation_note = reason
+        if self.fallback_sink is not None:
+            self.fallback_sink(reason)
+        return plan
 
     def build_plan(
         self,
@@ -142,14 +161,14 @@ class ModelDrivenPlanner:
         try:
             plan = self.provider.generate_plan(goal, available_tools, self.limits, tool_schemas)
         except Exception:
-            return self.fallback.build_plan(goal, available_tools)
+            return self._degrade(goal, available_tools, "model planner raised; fell back to rule-based")
 
         if not plan.steps:
-            return self.fallback.build_plan(goal, available_tools)
+            return self._degrade(goal, available_tools, "model planner returned empty plan; fell back to rule-based")
 
         for step in plan.steps:
             if step.tool and step.tool not in available_tools:
-                return self.fallback.build_plan(goal, available_tools)
+                return self._degrade(goal, available_tools, "model planner referenced unknown tool; fell back to rule-based")
 
         steps = plan.steps[: self.limits.max_steps]
         for i, s in enumerate(steps):

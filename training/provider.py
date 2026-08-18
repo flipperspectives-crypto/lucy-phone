@@ -63,6 +63,27 @@ class LocalLucyProvider(BaseProvider):
             self._loaded = True
         return self._model  # type: ignore[return-value]
 
+    def self_check(self) -> bool:
+        """Tamper-evident integrity check.
+
+        Verifies the saved weights actually reproduce the ``probe_loss`` recorded
+        in the checkpoint by ``train()``.  A checkpoint with random weights but
+        faked training metadata fails this, so the audit cannot be satisfied by a
+        lie.  Checkpoints without probe metadata (legacy) are trusted on metadata.
+        """
+        if not self.checkpoint_path.exists():
+            return False
+        sd = json.loads(self.checkpoint_path.read_text())
+        if "probe_seq" not in sd or "probe_loss" not in sd:
+            return True  # legacy checkpoint: trust training metadata
+        seq = sd["probe_seq"]
+        if len(seq) < 2:
+            return True
+        m = self._ensure_loaded()
+        logits, _ = m.forward([seq[:-1]])
+        loss, _ = m.cross_entropy(logits, [seq[1:]])
+        return abs(loss - sd["probe_loss"]) < 0.5
+
     # --- capabilities ------------------------------------------------------
     def capabilities(self) -> set[Capability]:
         return {

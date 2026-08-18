@@ -45,6 +45,46 @@ def _plan_with(steps: list[PlanStep]) -> RulePlanner:
     return CustomPlanner()
 
 
+class PlannerDegradationTests(unittest.IsolatedAsyncioTestCase):
+    def test_fallback_marks_plan_degraded_and_records(self):
+        from lucy_edge.agent.planner import ModelDrivenPlanner
+
+        class FailingProvider:
+            def generate_plan(self, *a, **k):
+                raise RuntimeError("model planner boom")
+
+        sink_calls = []
+        planner = ModelDrivenPlanner(
+            AgentLimits(), FailingProvider(), fallback_sink=lambda r: sink_calls.append(r)
+        )
+        plan = planner.build_plan("do something", ["memory.search"])
+        self.assertTrue(plan.degraded)
+        self.assertIsNotNone(plan.degradation_note)
+        self.assertEqual(len(sink_calls), 1)
+
+    def test_empty_model_plan_degrades(self):
+        from lucy_edge.agent.planner import ModelDrivenPlanner, Plan, PlanStep
+
+        class EmptyProvider:
+            def generate_plan(self, *a, **k):
+                return Plan(goal="x", steps=[])
+
+        planner = ModelDrivenPlanner(AgentLimits(), EmptyProvider())
+        plan = planner.build_plan("goal", ["memory.search"])
+        self.assertTrue(plan.degraded)
+
+    def test_unknown_tool_in_model_plan_degrades(self):
+        from lucy_edge.agent.planner import ModelDrivenPlanner, Plan, PlanStep
+
+        class BadToolProvider:
+            def generate_plan(self, *a, **k):
+                return Plan(goal="x", steps=[PlanStep(index=0, action="execute", tool="nope")])
+
+        planner = ModelDrivenPlanner(AgentLimits(), BadToolProvider())
+        plan = planner.build_plan("goal", ["memory.search"])
+        self.assertTrue(plan.degraded)
+
+
 class AgentLimitsTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_timeout_must_be_shorter_than_task_timeout(self):
         with self.assertRaises(ValueError):

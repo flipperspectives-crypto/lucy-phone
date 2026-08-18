@@ -160,6 +160,15 @@ class TestTrainAndProvider(unittest.TestCase):
         summary, ledger_db = self._train_tmp()
         self.assertTrue(os.path.exists(summary["latest"]))
         self.assertLess(summary["final_loss"], 6.0)  # learned something vs ~5.67 start
+        # honest generalization signal: a held-out validation loss is reported
+        self.assertIn("val_loss", summary)
+        self.assertIsNotNone(summary["val_loss"])
+        # tamper-evident integrity probe embedded in the checkpoint
+        import json
+
+        sd = json.loads(open(summary["latest"]).read())
+        self.assertIn("probe_seq", sd)
+        self.assertIn("probe_loss", sd)
         ledger = LineageLedger(ledger_db)
         runs = ledger.all_runs()
         self.assertEqual(len(runs), 1)
@@ -284,6 +293,63 @@ class TestSyntheticPatternLearning(unittest.TestCase):
             self.assertEqual(g1, "A")
             self.assertEqual(g2, "B")
         finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestIntegrityProbe(unittest.TestCase):
+    def test_self_check_passes_for_trained(self):
+        import os, tempfile
+
+        from .helpers import trained_checkpoint
+        from training.provider import LocalLucyProvider
+
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            prov = LocalLucyProvider(checkpoint_path=cp, model_name="lucy-local")
+            self.assertTrue(prov.self_check())
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_self_check_fails_for_tampered(self):
+        import json, os, random, tempfile
+
+        from training.train import train
+        from training.provider import LocalLucyProvider
+
+        tmp = tempfile.mkdtemp()
+        try:
+            summary = train(
+                repo_root=".",
+                corpus_text="AB" * 500,
+                checkpoint_dir=os.path.join(tmp, "ck"),
+                steps=50,
+                lr=0.05,
+                ctx=16,
+                d_model=32,
+                n_layers=1,
+                ff_mult=4,
+                seed=1,
+                batch_size=4,
+                stride=2,
+                lineage_db=os.path.join(tmp, "lineage.db"),
+                git_hash="t",
+            )
+            cp = summary["latest"]
+            sd = json.loads(open(cp).read())
+            # tamper: randomize the embedding weights but keep the claimed loss
+            rnd = random.Random(99)
+            sd["tok_emb"] = [
+                [rnd.uniform(-0.1, 0.1) for _ in range(sd["d"])] for _ in range(sd["vocab"])
+            ]
+            open(cp, "w").write(json.dumps(sd))
+            prov = LocalLucyProvider(checkpoint_path=cp, model_name="lucy-local")
+            self.assertFalse(prov.self_check())
+        finally:
+            import shutil
+
             shutil.rmtree(tmp, ignore_errors=True)
 
 
