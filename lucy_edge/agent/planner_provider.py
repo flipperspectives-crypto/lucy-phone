@@ -25,6 +25,7 @@ import json
 import re
 from typing import Any, Optional
 
+from ..providers.base import ProviderError
 from .limits import AgentLimits
 from .planner import Plan, PlanStep
 
@@ -283,7 +284,10 @@ class ModelPlannerProvider(PlannerProvider):
     ) -> Plan:
         data = self._extract_json(raw)
         if data is None:
-            return self._fallback.generate_plan(goal, available_tools, limits)
+            raise ProviderError(
+                "model planner produced no parseable plan; refusing to "
+                "substitute a fallback plan (fail-closed)"
+            )
 
         raw_steps = data.get("steps", [])
         steps: list[PlanStep] = []
@@ -314,7 +318,10 @@ class ModelPlannerProvider(PlannerProvider):
             )
 
         if not steps:
-            return self._fallback.generate_plan(goal, available_tools, limits)
+            raise ProviderError(
+                "model planner produced no usable steps; refusing to "
+                "substitute a fallback plan (fail-closed)"
+            )
 
         if steps[-1].action != "stop":
             if len(steps) < limits.max_steps:

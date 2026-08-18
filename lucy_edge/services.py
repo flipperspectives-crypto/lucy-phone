@@ -258,12 +258,13 @@ def build_services(
 
     # Build the agent planner.  Phone-safe default is the rule-based planner.
     # When planner_backend == "model", use ModelDrivenPlanner with the
-    # ModelPlannerProvider.  The provider routes through ModelRouter: when the
-    # configured Ollama URL is remote it supplies the remote target host so the
-    # ARM guard allows routing to e.g. a Windows laptop; when routing is denied
-    # (localhost on ARM, no remote host, etc.) it safely falls back to the
-    # deterministic MockPlannerProvider.  So no real model runs unless the
-    # operator explicitly configures and enables remote inference.
+    # ModelPlannerProvider.  The provider routes through ModelRouter to the
+    # local on-device TinyTransformer (local_lucy) only -- there is no remote
+    # or cloud inference.  If routing denies the planning request or the local
+    # model is unavailable / produces no usable plan, the provider FAILS CLOSED
+    # (raises).  ModelDrivenPlanner then safely degrades to the deterministic
+    # RulePlanner, which performs no model inference.  No mock/cloud fallback
+    # ever substitutes real planning.
     if config.agent.planner_backend == "model":
         _provider = ModelPlannerProvider(config, router, providers)
         planner = ModelDrivenPlanner(agent_limits, _provider)

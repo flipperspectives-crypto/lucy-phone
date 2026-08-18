@@ -8,7 +8,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lucy_edge.gateway.server import TASKS_KEY, create_app
 
-from .helpers import make_config, temp_dir, wait_until
+from lucy_edge.hardware.snapshot import HardwareSnapshot
+
+from .helpers import local_checkpoint, make_config, temp_dir, wait_until
 from .services_open import open_services
 
 
@@ -54,6 +56,47 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["ok"])
         self.assertTrue(body["simulated"])
         self.assertEqual(body["message"], "NEXUS SAFE")
+
+    async def test_local_lucy_chat_on_device(self):
+        """A chat request routed to the local_lucy provider runs on-device
+        (simulated=False) with no network/cloud, once telemetry verifies the
+        phone is cool.  Proves the gateway's inference path is sovereign."""
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.training.checkpoint_path = local_checkpoint(tmp)
+        services = await open_services(config)
+        # Headless env has no real sensors; inject a verified-cool snapshot so
+        # the phone-safety gate permits local inference (proves the gate, not a
+        # bypass).
+        services.telemetry.snapshot = lambda: HardwareSnapshot(
+            host_id=config.host_id,
+            host_role=config.host_role,
+            cpu_temperature_c=50.0,
+            ram_available_bytes=8 * 1024**3,
+            thermal_source="test",
+            telemetry_available=True,
+        )
+        app = create_app(services)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/v1/chat",
+                json={
+                    "model": "lucy:1.7b",
+                    "provider": "local_lucy",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                headers=self.auth,
+            )
+            self.assertEqual(resp.status, 200)
+            body = await resp.json()
+            self.assertTrue(body["ok"])
+            self.assertFalse(body["simulated"])
+            self.assertEqual(body["provider"], "local_lucy")
+        finally:
+            await client.close()
+            await services.close()
 
     async def test_chat_requires_auth(self):
         resp = await self.client.post(

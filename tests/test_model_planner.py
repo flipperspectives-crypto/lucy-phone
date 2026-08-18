@@ -23,7 +23,7 @@ from lucy_edge.agent.runtime import AgentRuntime, AgentState
 from lucy_edge.providers.base import ProviderError
 from lucy_edge.services import build_services
 
-from .helpers import FakeTransport, make_config, temp_dir
+from .helpers import FakeTransport, local_checkpoint, make_config, temp_dir
 
 
 class MockPlannerProviderTests(unittest.TestCase):
@@ -172,6 +172,28 @@ class AgentRuntimeWithModelPlannerTests(unittest.IsolatedAsyncioTestCase):
                 evidence=services.evidence,
                 context=services.context,
             )
+            result = await runtime.run()
+            self.assertEqual(result.final_status, AgentState.COMPLETED)
+            self.assertGreater(result.steps_executed, 0)
+        finally:
+            await services.close()
+
+    async def test_runtime_model_planner_routes_through_local_lucy(self):
+        """End-to-end cognitive loop: with planner_backend=model and a
+        local_lucy checkpoint, planning is attempted on-device via the local
+        provider.  An untrained tiny model yields no parseable plan, so the
+        provider FAILS CLOSED and ModelDrivenPlanner safely degrades to the
+        deterministic RulePlanner -- the agent still completes with a valid
+        plan, never a mock or cloud substitution."""
+        tmp = temp_dir()
+        config = make_config(tmp, phone_local_inference=True)
+        config.agent.planner_backend = "model"
+        config.training.checkpoint_path = local_checkpoint(tmp)
+        services = build_services(config)
+        await services.open()
+        try:
+            self.assertEqual(services.planner.backend, "MODEL_DRIVEN")
+            runtime = services.new_agent_run("check system health")
             result = await runtime.run()
             self.assertEqual(result.final_status, AgentState.COMPLETED)
             self.assertGreater(result.steps_executed, 0)

@@ -100,7 +100,7 @@ class TrainingConfig(BaseModel):
 
 
 class RoutingConfig(BaseModel):
-    default_model: str = "qwen3:1.7b"
+    default_model: str = "lucy:1.7b"
     allow_mock_generation: bool = True
     # Operator-declared parameter sizes (billions) for model families whose tag
     # does not encode a size.  Declared sizes feed classification; never guessed.

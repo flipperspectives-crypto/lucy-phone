@@ -75,25 +75,21 @@ def temp_dir() -> str:
 
 
 def local_checkpoint(tmp: str) -> str:
-    """Write a minimal ``local_lucy`` checkpoint file so ``LocalLucyProvider``
-    registers and reports healthy (on-device inference is present).
+    """Write a real (tiny, randomly-initialized) ``local_lucy`` checkpoint so
+    ``LocalLucyProvider`` registers, reports healthy, AND can actually run
+    on-device generation in tests.
 
-    The contents are intentionally minimal: routing/health checks only need the
-    file to exist -- real generation requires a fully trained checkpoint (the
-    one honest gap the foundation audit still flags).
+    The weights are random (not trained), so generated text is meaningless --
+    the honest "model_weights_present" GAP is about *trained* quality, not file
+    presence.  Real generation requires a trained checkpoint (Step 2).
     """
     cp = Path(tmp) / "lucy_local_checkpoint.json"
-    cp.write_text(
-        json.dumps(
-            {
-                "vocab": 256,
-                "d": 64,
-                "ctx": 64,
-                "L": 2,
-                "ff": 4,
-            }
-        )
-    )
+    from training.tiny_transformer import TinyTransformer
+
+    model = TinyTransformer(vocab=256, d_model=64, ctx=32, n_layers=2, ff_mult=4, seed=1)
+    sd = model.state_dict()
+    sd.update({"vocab": 256, "d": 64, "ctx": 32, "L": 2, "ff": 4, "trained_steps": 5, "final_loss": 3.21})
+    cp.write_text(json.dumps(sd))
     return str(cp)
 
 
