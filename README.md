@@ -124,6 +124,24 @@ Plans failing any gate are declined (`FAILED`, `completion_reason` explains why)
 
 Dream insights can be approved/modified/rejected in the morning review.
 
+## Model Role & Honest Scope
+
+This is stated plainly so no capability is implied that does not exist:
+
+- **`local_lucy` is a generative reflection layer only.** The from-scratch
+  `TinyTransformer` (see `training/`) is loaded by `LocalLucyProvider` and used
+  solely to produce a short `generated_reflection` string at the end of a run
+  (`lucy_core/runtime/loyal_runtime.py`). It does **not** drive planning,
+  tool selection, or any gate decision.
+- **Planning and gates come from `DevotionalCore` + the predictive/rule
+  planner.** Loyalty (≥60% devotional alignment), pluralism, and honesty gates
+  operate on that plan; they are not a function of the trained weights.
+- **Sleep / NREM / REM / LoRA consolidation trains the `lucy_core` brain's
+  feature vectors, but it is not yet wired back into `local_lucy` inference.**
+  Introspection therefore reports `loRA_adapters` and `configuration_evolution`
+  as `UNAVAILABLE` *by design* until that wiring lands. This is tracked as a
+  known follow-up, not silently claimed as active evolution.
+
 ## Testing
 
 ```bash

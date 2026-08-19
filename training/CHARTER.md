@@ -45,3 +45,15 @@ This charter trains a **tiny model from scratch** in pure Python. It does NOT
 load Ollama/llama.cpp weights. The principles (local, curated, honest, gated)
 apply identically; only the mechanism differs. Mislabeling our from-scratch
 model as an Ollama/llama.cpp load would violate principle 3.
+
+## 6. Scope of the trained model (honesty about what it does)
+
+The from-scratch `TinyTransformer` is the **on-device generative reflection
+layer** (`local_lucy`). It is not the planner and does not decide actions, tool
+calls, or gate outcomes — those come from `DevotionalCore` and the predictive/
+rule planner. Sleep-cycle LoRA consolidation trains the `lucy_core` brain's
+feature vectors but is **not yet wired back into `local_lucy` inference**.
+Introspection reports `loRA_adapters` and `configuration_evolution` as
+`UNAVAILABLE` until that wiring lands. Claiming continuous, weight-level
+evolution of the served model before that wiring exists would violate principle
+3 (radical epistemic honesty).
