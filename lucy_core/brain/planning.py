@@ -6,11 +6,11 @@ global workspace content to generate structured plans.
 
 from __future__ import annotations
 
-import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 
+from lucy_core._linalg import argsort_desc
 from lucy_edge.agent.planner import Plan, PlanStep
 from lucy_edge.agent.limits import AgentLimits
 from lucy_core.brain.hierarchical import HierarchicalPrediction, PredictionLevel
@@ -97,7 +97,7 @@ class PredictivePlanner:
         # Get top-k action candidates from logits
         action_logits = prediction.action_logits
         top_k = min(self.limits.max_steps, 8)
-        top_indices = np.argsort(action_logits)[-top_k:][::-1]
+        top_indices = argsort_desc(action_logits, top_k)
         
         # Build plan steps
         steps = []

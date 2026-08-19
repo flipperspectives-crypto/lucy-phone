@@ -14,8 +14,8 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
-import numpy as np
 
+from lucy_core._linalg import randn
 from lucy_core.devotional.core import DevotionalCore
 from lucy_core.memory.hippocampal import HippocampalIndexer, EpisodicBuffer
 from lucy_core.brain.lora import LoRAAdapterManager
@@ -85,38 +85,42 @@ class NREMReplay:
                 sensory = memory.sensory_features
                 contextual = memory.contextual_features
                 abstract = memory.abstract_features
-                
+
+                # Wrap 1D feature vectors into (batch=1, seq=1, dim) 3D tensors
+                def _to_3d(vec):
+                    return [[list(vec)]]
+
                 # Train hippocampal autoencoder (pattern separation/completion)
                 train_result = self.hippocampal.train_step(sensory)
                 total_loss += train_result["recon_loss"]
-                
+
                 # Update LoRA adapters for each level
                 # Sensory level
                 loss_sensory = self.lora_manager.train_step(
                     level="sensory",
                     module="q_proj",
-                    input_activations=sensory.reshape(1, 1, -1),
-                    target_activations=sensory.reshape(1, 1, -1),  # Autoencoder target
+                    input_activations=_to_3d(sensory),
+                    target_activations=_to_3d(sensory),  # Autoencoder target
                 )
                 total_loss += loss_sensory
                 lora_updates += 1
-                
+
                 # Contextual level
                 loss_contextual = self.lora_manager.train_step(
                     level="contextual",
                     module="q_proj",
-                    input_activations=contextual.reshape(1, 1, -1),
-                    target_activations=contextual.reshape(1, 1, -1),
+                    input_activations=_to_3d(contextual),
+                    target_activations=_to_3d(contextual),
                 )
                 total_loss += loss_contextual
                 lora_updates += 1
-                
+
                 # Abstract level
                 loss_abstract = self.lora_manager.train_step(
                     level="abstract",
                     module="q_proj",
-                    input_activations=abstract.reshape(1, 1, -1),
-                    target_activations=abstract.reshape(1, 1, -1),
+                    input_activations=_to_3d(abstract),
+                    target_activations=_to_3d(abstract),
                 )
                 total_loss += loss_abstract
                 lora_updates += 1
@@ -364,9 +368,9 @@ class SleepOrchestrator:
             class SimpleMemory:
                 def __init__(self, exp):
                     self.memory_id = str(uuid.uuid4())[:8]
-                    self.sensory_features = exp.get("sensory_features", np.random.randn(256).astype(np.float32))
-                    self.contextual_features = exp.get("contextual_features", np.random.randn(512).astype(np.float32))
-                    self.abstract_features = exp.get("abstract_features", np.random.randn(512).astype(np.float32))
+                    self.sensory_features = exp.get("sensory_features", randn(256))
+                    self.contextual_features = exp.get("contextual_features", randn(512))
+                    self.abstract_features = exp.get("abstract_features", randn(512))
                     self.devotional_alignment = exp.get("devotional_alignment", 0.5)
                     self.context = exp.get("context", {})
                     self.devotional_state = exp.get("devotional_state", "deep_trust")

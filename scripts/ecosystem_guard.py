@@ -14,11 +14,12 @@ This is the technical backstop for Lucy's fail-closed / no-public-cloud /
 nothing-imported-from-outside directive.  It is wired into the test suite
 (see tests/test_ecosystem_guard.py) so a regression fails CI immediately.
 
-NOTE: local plumbing libraries that are installed on-device and never dial out
-(aiohttp + websockets for the loopback server, pydantic for config, numpy for
-the brain, PyYAML, aiosqlite) are intentionally NOT banned here -- they are
-being removed in a later from-scratch pass (Phase 2).  Once gone, extend
-NETWORK_MODULES to ban them too.
+NOTE: the learning core (brain + hippocampal memory) is now pure-Python with
+no numpy (numpy is banned below and removed from requirements.txt).  The remaining
+on-device plumbing libraries that are NOT yet banned here are aiohttp + websockets
+(loopback server), pydantic (config), PyYAML, and aiosqlite -- they are removed
+in a later from-scratch pass (Phase 2b/2c).  Once the rest are gone, this list
+shrinks to nothing.
 
 Usage:  python3 scripts/ecosystem_guard.py
 """
@@ -74,6 +75,10 @@ NETWORK_MODULES = {
     "boto3",
     "boto",
     "botocore",
+    # Heavy third-party numeric lib -- the learning core is from-scratch, no numpy.
+    "numpy",
+    "scipy",
+    "pandas",
 }
 
 # Marker that an external / agent-generated snippet was pasted in, or that an

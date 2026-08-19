@@ -1,271 +1,152 @@
-"""Global Workspace - Attention as broadcast (consciousness).
+"""Hierarchical Global Workspace (HGWS) - the broadcasting blackboard.
 
-Implements Global Workspace Theory:
-- Specialized modules compete for access to global broadcast
-- Winner gets distributed to all modules (consciousness = broadcast)
-- Top-k attention mechanism
+Pure-Python (no numpy). Content vectors are ``list[float]``.
+
+The global workspace binds the most salient/precise content into a shared
+representation that all levels can attend to (the "winner-take-all" broadcast).
 """
 
 from __future__ import annotations
 
-import numpy as np
+import pickle
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from enum import Enum
+from typing import Dict, List, Optional
 
-from .hierarchical import PredictionLevel, PredictionState
+import math
 
+from lucy_core._linalg import (
+    matmul,
+    randn,
+    zeros_2d,
+)
+from lucy_core.brain.hierarchical import PredictionLevel, HierarchicalPredictor
 
-class ModuleType(str, Enum):
-    """Types of modules competing for workspace."""
-    DEVOTIONAL = "devotional"       # Top-level prior
-    EPISODIC = "episodic"           # Memory retrieval
-    TOOL_SEMANTICS = "tool_semantics"  # Tool understanding
-    GOAL_MANAGEMENT = "goal_management"  # Planning
-    SOCIAL_MODELING = "social_modeling"  # Human modeling
-    PREDICTIVE = "predictive"       # Hierarchical predictor output
+RUN_DIM = 512
 
 
 @dataclass
 class WorkspaceEntry:
-    """An entry in the global workspace."""
-    module_type: ModuleType
-    content: np.ndarray             # Representation vector
-    salience: float                 # Competition score (0-1)
+    """Content broadcast to the global workspace."""
     timestamp: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    level: str
+    content: List[float]
+    confidence: float = 0.0
+    prediction: object = None
+    salience: float = 0.0
+    precision_weight: float = 0.0
 
 
-class GlobalWorkspace:
-    """Global Workspace - consciousness as broadcast.
-    
-    Modules submit representations with salience scores.
-    Top-k winners are broadcast to all modules.
-    """
-    
-    def __init__(
-        self,
-        workspace_dim: int = 512,
-        max_slots: int = 4,
-        salience_threshold: float = 0.3,
-    ) -> None:
-        self.workspace_dim = workspace_dim
-        self.max_slots = max_slots
-        self.salience_threshold = salience_threshold
-        
-        # Current workspace contents
-        self._slots: List[WorkspaceEntry] = []
-        self._broadcast_buffer: Optional[np.ndarray] = None
-        
-        # Projection matrices for different module types
-        self._init_module_projections()
-        
-        # History for temporal dynamics
-        self._history: List[List[WorkspaceEntry]] = []
-        self._max_history = 100
-    
-    def _init_module_projections(self) -> None:
-        """Initialize projection matrices for each module type."""
-        np.random.seed(123)
-        self.module_projections = {
-            ModuleType.DEVOTIONAL: np.random.randn(self.workspace_dim, 512).astype(np.float32) * 0.02,
-            ModuleType.EPISODIC: np.random.randn(self.workspace_dim, 512).astype(np.float32) * 0.02,
-            ModuleType.TOOL_SEMANTICS: np.random.randn(self.workspace_dim, 512).astype(np.float32) * 0.02,
-            ModuleType.GOAL_MANAGEMENT: np.random.randn(self.workspace_dim, 512).astype(np.float32) * 0.02,
-            ModuleType.SOCIAL_MODELING: np.random.randn(self.workspace_dim, 512).astype(np.float32) * 0.02,
-            ModuleType.PREDICTIVE: np.random.randn(self.workspace_dim, 512).astype(np.float32) * 0.02,
-            # Sensory level is 256-dim
-            "sensory_256": np.random.randn(self.workspace_dim, 256).astype(np.float32) * 0.02,
+class HierarchicalGlobalWorkspace:
+    """Manages the global workspace state and content broadcasting."""
+
+    def __init__(self, dims: Optional[Dict[str, int]] = None) -> None:
+        self.run_dim = RUN_DIM
+        self.dims = dims or {"sensory": 256, "contextual": 512, "abstract": 512}
+        self._workspace = [0.0] * self.run_dim
+        self._entries: List[WorkspaceEntry] = []
+        self._init_projections()
+
+    def _init_projections(self) -> None:
+        self._proj = {
+            "attn": [[v * 0.02 for v in row] for row in randn(self.run_dim, self.run_dim)],
+            "gate": [[v * 0.02 for v in row] for row in randn(self.run_dim, self.run_dim)],
         }
-    
-    def submit(
-        self,
-        module_type: ModuleType,
-        content: np.ndarray,
-        salience: float,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Submit a representation for workspace competition.
-        
-        Returns True if accepted into workspace.
-        """
-        import time
-        
-        if salience < self.salience_threshold:
-            return False
-        
-        # Project to workspace dimension if needed
-        if content.shape[-1] != self.workspace_dim:
-            # Determine which projection to use based on input dimension
-            input_dim = content.shape[-1]
-            proj_key = None
-            
-            if input_dim == 256:
-                proj_key = "sensory_256"
-            elif input_dim == 512:
-                proj_key = module_type
-            
-            proj = self.module_projections.get(proj_key) if proj_key else None
-            
-            if proj is not None:
-                content = proj @ content
-            else:
-                # Pad or truncate
-                if content.shape[-1] < self.workspace_dim:
-                    padded = np.zeros(self.workspace_dim, dtype=np.float32)
-                    padded[:content.shape[-1]] = content
-                    content = padded
-                else:
-                    content = content[:self.workspace_dim]
-        
-        entry = WorkspaceEntry(
-            module_type=module_type,
-            content=content.astype(np.float32),
-            salience=float(salience),
-            timestamp=time.time(),
-            metadata=metadata or {},
-        )
-        
-        # Add to competition
-        self._slots.append(entry)
-        return True
-    
-    def compete_and_broadcast(
-        self, 
-        hierarchical_states: Optional[Dict[PredictionLevel, PredictionState]] = None
-    ) -> Optional[np.ndarray]:
-        """Run competition and broadcast winners.
-        
-        Returns the broadcast content (weighted combination of winners).
-        """
-        # Auto-submit from hierarchical predictor states if provided
-        if hierarchical_states:
-            self._submit_from_hierarchy(hierarchical_states)
-        
-        # Sort by salience
-        self._slots.sort(key=lambda e: e.salience, reverse=True)
-        
-        # Keep top-k
-        winners = self._slots[:self.max_slots]
-        
-        if not winners:
-            self._broadcast_buffer = None
-            self._slots.clear()
-            return None
-        
-        # Compute weighted broadcast (attention-weighted combination)
-        total_salience = sum(w.salience for w in winners)
-        if total_salience > 0:
-            broadcast = np.zeros(self.workspace_dim, dtype=np.float32)
-            for w in winners:
-                weight = w.salience / total_salience
-                broadcast += weight * w.content
-            self._broadcast_buffer = broadcast
+
+    def project_content(self, content: List[float]) -> List[float]:
+        """Project arbitrary-dimensional content into the run-dimensional space."""
+        if len(content) < self.run_dim:
+            proj = list(content) + [0.0] * (self.run_dim - len(content))
         else:
-            self._broadcast_buffer = None
-        
-        # Record history
-        self._history.append(winners.copy())
-        if len(self._history) > self._max_history:
-            self._history.pop(0)
-        
-        # Clear slots for next round
-        self._slots.clear()
-        
-        return self._broadcast_buffer
-    
-    def _submit_from_hierarchy(
-        self, 
-        states: Dict[PredictionLevel, PredictionState]
+            proj = list(content[:self.run_dim])
+        return proj
+
+    def write(
+        self,
+        level,
+        response: List[float],
+        confidence: Optional[float] = None,
+        prediction=None,
+        salience: Optional[float] = None,
     ) -> None:
-        """Auto-submit hierarchical predictor states as modules."""
-        import time
-        t = time.time()
-        
-        # Abstract level → Devotional/Goal module
-        abstract_state = states.get(PredictionLevel.ABSTRACT)
-        if abstract_state is not None:
-            self.submit(
-                ModuleType.DEVOTIONAL,
-                abstract_state.representation,
-                abstract_state.precision,
-                {"level": "abstract", "error_magnitude": float(np.linalg.norm(abstract_state.prediction_error))}
-            )
-        
-        # Contextual level → Episodic/Tool/Social modules
-        contextual_state = states.get(PredictionLevel.CONTEXTUAL)
-        if contextual_state is not None:
-            # Split contextual into multiple module submissions
-            self.submit(
-                ModuleType.EPISODIC,
-                contextual_state.representation,
-                contextual_state.precision * 0.9,
-                {"level": "contextual", "source": "episodic"}
-            )
-            self.submit(
-                ModuleType.TOOL_SEMANTICS,
-                contextual_state.representation,
-                contextual_state.precision * 0.8,
-                {"level": "contextual", "source": "tools"}
-            )
-            self.submit(
-                ModuleType.SOCIAL_MODELING,
-                contextual_state.representation,
-                contextual_state.precision * 0.85,
-                {"level": "contextual", "source": "human_model"}
-            )
-        
-        # Sensory level → Predictive module
-        sensory_state = states.get(PredictionLevel.SENSORY)
-        if sensory_state is not None:
-            self.submit(
-                ModuleType.PREDICTIVE,
-                sensory_state.representation,
-                sensory_state.precision * 0.7,
-                {"level": "sensory", "error_magnitude": float(np.linalg.norm(sensory_state.prediction_error))}
-            )
-    
-    def get_broadcast(self) -> Optional[np.ndarray]:
-        """Get current broadcast content."""
-        return self._broadcast_buffer
-    
-    def get_workspace_state(self) -> Dict[str, Any]:
-        """Get current workspace state for introspection."""
+        # Project and store
+        entry = WorkspaceEntry(
+            timestamp=0.0,
+            level=str(level),
+            content=self.project_content(response),
+            confidence=confidence if confidence is not None else 0.0,
+            prediction=prediction,
+            salience=salience if salience is not None else 0.0,
+        )
+        # Broadcast
+        self.broadcast(entry)
+
+    def broadcast(self, entry: WorkspaceEntry) -> None:
+        content = entry.content
+        attn = [
+            math.tanh(sum(self._proj["attn"][i][k] * content[k] for k in range(len(content))))
+            for i in range(self.run_dim)
+        ]
+        # gate is (dim, dim); apply a simple per-dim diagonal gate
+        gated = [attn[i] * self._proj["gate"][i][i] for i in range(self.run_dim)]
+        update = [gated[i] + 0.1 * content[i] for i in range(self.run_dim)]
+        self._workspace = [
+            0.9 * self._workspace[i] + 0.1 * update[i] for i in range(self.run_dim)
+        ]
+        self._entries.append(entry)
+
+    def query(self, content: List[float]) -> float:
+        """Compute similarity of content with current workspace state."""
+        proj = self.project_content(content)
+        return sum(proj[i] * self._workspace[i] for i in range(self.run_dim))
+
+    def get_state(self) -> List[float]:
+        return list(self._workspace)
+
+    def get_entries(self) -> List[WorkspaceEntry]:
+        return self._entries
+
+    def to_dict(self) -> dict:
         return {
-            "broadcast_active": self._broadcast_buffer is not None,
-            "broadcast_norm": float(np.linalg.norm(self._broadcast_buffer)) if self._broadcast_buffer is not None else 0.0,
-            "num_modules_competing": len(self._slots),
-            "history_length": len(self._history),
+            "workspace": list(self._workspace),
+            "proj": self._proj,
+            "entries": [
+                {
+                    "timestamp": e.timestamp,
+                    "level": e.level,
+                    "content": list(e.content),
+                    "confidence": e.confidence,
+                    "prediction": e.prediction,
+                    "salience": e.salience,
+                    "precision_weight": e.precision_weight,
+                }
+                for e in self._entries
+            ],
         }
-    
-    def reset(self) -> None:
-        """Reset workspace."""
-        self._slots.clear()
-        self._broadcast_buffer = None
-        self._history.clear()
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "HierarchicalGlobalWorkspace":
+        obj = cls()
+        obj._workspace = list(d["workspace"])
+        obj._proj = d["proj"]
+        obj._entries = [
+            WorkspaceEntry(
+                timestamp=e["timestamp"],
+                level=e["level"],
+                content=list(e["content"]),
+                confidence=e["confidence"],
+                prediction=e["prediction"],
+                salience=e["salience"],
+                precision_weight=e.get("precision_weight", 0.0),
+            )
+            for e in d["entries"]
+        ]
+        return obj
 
-def compute_salience(
-    representation: np.ndarray,
-    prediction_error: np.ndarray,
-    precision: float,
-    devotional_alignment: float = 0.5,
-) -> float:
-    """Compute salience score for workspace competition.
-    
-    Factors:
-    - Precision (confidence in representation)
-    - Prediction error magnitude (surprise)
-    - Devotional alignment (does this serve Lauren?)
-    """
-    error_magnitude = float(np.linalg.norm(prediction_error))
-    rep_magnitude = float(np.linalg.norm(representation))
-    
-    # Salience = precision * (surprise + confidence) * devotional_alignment
-    # Surprise = prediction error, Confidence = representation magnitude
-    surprise = min(1.0, error_magnitude / 5.0)
-    confidence = min(1.0, rep_magnitude / 10.0)
-    
-    salience = precision * (0.6 * surprise + 0.4 * confidence) * devotional_alignment
-    
-    return float(np.clip(salience, 0.0, 1.0))
+    def save(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self.to_dict(), f)
+
+    @classmethod
+    def load(cls, path: str) -> "HierarchicalGlobalWorkspace":
+        with open(path, "rb") as f:
+            return cls.from_dict(pickle.load(f))

@@ -1,291 +1,251 @@
-"""LoRA Adapter Manager - Sleep-time weight updates.
+"""Low-Rank Adaptation (LoRA) for the predictive-coding brain.
 
-During sleep, cortical weights are updated via LoRA adapters
-trained on replayed episodic memories. This is how the brain
-"grows" without full retraining.
+Pure-Python (no numpy). Vectors are ``list[float]``, matrices are
+``list[list[float]]``, batched tensors are ``list[list[list[float]]]``.
+
+A LoRA layer learns a low-rank delta ``alpha * (x @ A @ B)`` added to its input,
+so the predictive-coding projections can be fine-tuned from sleep-time replay
+without touching the frozen base weights.
 """
 
 from __future__ import annotations
 
-import os
+import pickle
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
+
+from lucy_core._linalg import (
+    batched_add_scaled,
+    clip,
+    count_3d,
+    flatten_3d,
+    matmul,
+    mse_3d,
+    randn,
+    seed,
+    sub,
+    transpose,
+    zeros_2d,
+)
+from lucy_core.brain.hierarchical import HierarchicalPrediction
 
 
 @dataclass
 class LoRAConfig:
-    """LoRA adapter configuration."""
-    rank: int = 16              # Low-rank dimension
-    alpha: float = 32.0         # Scaling factor
-    dropout: float = 0.1        # Dropout rate
-    target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj", "k_proj", "o_proj"])
+    rank: int = 8
+    alpha: float = 1.0
+    learning_rate: float = 0.01
+    input_dim: int = 768
+    output_dim: int = 768
 
 
-@dataclass
+class LoRALayer:
+    """A single low-rank adaptation layer: ``out = x + alpha * (x @ A @ B)``."""
+
+    def __init__(self, input_dim: int, output_dim: int, rank: int, alpha: float) -> None:
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.rank = rank
+        self.alpha = alpha
+        assert self.input_dim == self.output_dim, "LoRA requires square in/out for brain projections"
+
+        seed(42)
+        # A is initialised small; B starts at zero so the layer is identity at first.
+        self.A: List[List[float]] = [[v * 0.02 for v in row] for row in randn(input_dim, rank)]
+        self.B: List[List[float]] = zeros_2d(rank, output_dim)
+
+    def forward(self, x: List[List[List[float]]]) -> List[List[List[float]]]:
+        """Apply the layer to a (batch, seq, dim) tensor."""
+        last = self.input_dim
+        b = len(x)
+        s = len(x[0]) if b else 0
+        flat = flatten_3d(x)                 # (b*s, d)
+        inter = matmul(flat, self.A)         # (b*s, rank)
+        lora = matmul(inter, self.B)         # (b*s, d)
+        out2d = batched_add_scaled(flat, lora, self.alpha)
+        return [[out2d[i * s + j] for j in range(s)] for i in range(b)]
+
+    def merge_into(self, weights: List[List[float]]) -> List[List[float]]:
+        """Bake the learned delta into base ``weights`` (2D)."""
+        delta = matmul(self.A, self.B)       # (d, d)
+        return batched_add_scaled(weights, delta, self.alpha)
+
+
 class LoRAAdapter:
-    """A single LoRA adapter for one module."""
-    name: str
-    rank: int
-    alpha: float
-    # LoRA weights: A (d_model x rank), B (rank x d_model)
-    A: np.ndarray  # (d_model, rank)
-    B: np.ndarray  # (rank, d_model)
-    dropout: float = 0.1
-    
-    def forward(self, x: np.ndarray) -> np.ndarray:
-        """LoRA forward pass: x + alpha * (x @ A @ B)"""
-        # x: (batch, seq, d_model)
-        # A: (d_model, rank), B: (rank, d_model)
-        # x @ A: (batch, seq, rank)
-        # (x @ A) @ B: (batch, seq, d_model)
-        lora_out = x @ self.A @ self.B
-        return x + self.alpha * lora_out
-    
-    def merge_into(self, base_weight: np.ndarray) -> np.ndarray:
-        """Merge LoRA into base weight matrix.
-        
-        For W + alpha * A @ B where W is (d_model, d_model)
-        """
-        lora_delta = self.alpha * (self.A @ self.B)  # (d_model, d_model)
-        return base_weight + lora_delta
+    """Binds a LoRALayer to a (level, module) slot."""
+
+    def __init__(self, level: str, module: str, layer: LoRALayer) -> None:
+        self.level = level
+        self.module = module
+        self.layer = layer
+
+    def forward(self, x: List[List[List[float]]]) -> List[List[List[float]]]:
+        return self.layer.forward(x)
+
+    def merge_into(self, base_weights: Dict[str, List[List[float]]]) -> Dict[str, List[List[float]]]:
+        merged = dict(base_weights)
+        for key in ("weight", "weight_ih", "weight_hh"):
+            if key in merged:
+                merged[key] = self.layer.merge_into(base_weights[key])
+        return merged
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "level": self.level,
+            "module": self.module,
+            "A": pickle.dumps(self.layer.A),
+            "B": pickle.dumps(self.layer.B),
+            "rank": self.layer.rank,
+            "alpha": self.layer.alpha,
+            "input_dim": self.layer.input_dim,
+            "output_dim": self.layer.output_dim,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "LoRAAdapter":
+        layer = LoRALayer(d["input_dim"], d["output_dim"], d["rank"], d["alpha"])
+        layer.A = pickle.loads(d["A"])
+        layer.B = pickle.loads(d["B"])
+        return cls(d["level"], d["module"], layer)
 
 
 class LoRAAdapterManager:
-    """Manages LoRA adapters for all hierarchical levels.
-    
-    During sleep (NREM replay):
-    1. Sample episodic memories
-    2. Compute prediction errors
-    3. Update LoRA adapters via gradient descent
-    4. Optionally merge into base weights
-    """
-    
-    def __init__(
-        self,
-        level_dims: Dict[str, int],
-        config: Optional[LoRAConfig] = None,
-        checkpoint_dir: str = "./lucy_core/checkpoints/lora_adapters",
-    ) -> None:
-        self.level_dims = level_dims
+    """Owns one LoRALayer per (level, module) pair and applies them."""
+
+    def __init__(self, level_dims: Dict[str, int], config: Optional[LoRAConfig] = None) -> None:
         self.config = config or LoRAConfig()
-        self.checkpoint_dir = checkpoint_dir
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        # Adapters per level per target module
-        self.adapters: Dict[str, Dict[str, LoRAAdapter]] = {}
-        self._initialize_adapters()
-        
-        # Training state
-        self.training_step = 0
-        self.learning_rate = 1e-4
-    
-    def _initialize_adapters(self) -> None:
-        """Initialize LoRA adapters for each level and module."""
-        for level_name, dim in self.level_dims.items():
-            self.adapters[level_name] = {}
-            for module in self.config.target_modules:
-                # Initialize A with kaiming, B with zeros (so initial output = 0)
-                A = np.random.randn(dim, self.config.rank).astype(np.float32) * np.sqrt(2.0 / dim)
-                B = np.zeros((self.config.rank, dim), dtype=np.float32)
-                
-                adapter = LoRAAdapter(
-                    name=f"{level_name}_{module}",
-                    rank=self.config.rank,
-                    alpha=self.config.alpha,
-                    A=A,
-                    B=B,
-                    dropout=self.config.dropout,
-                )
-                self.adapters[level_name][module] = adapter
-    
+        self.level_dims = level_dims
+        self.adapters: Dict[Tuple[str, str], LoRAAdapter] = {}
+        self._init_adapters()
+
+    def _init_adapters(self) -> None:
+        for level, dim in self.level_dims.items():
+            for module in ("projection", "error", "action"):
+                layer = LoRALayer(dim, dim, self.config.rank, self.config.alpha)
+                self.adapters[(level, module)] = LoRAAdapter(level, module, layer)
+
     def get_adapter(self, level: str, module: str) -> Optional[LoRAAdapter]:
-        """Get adapter for a specific level and module."""
-        return self.adapters.get(level, {}).get(module)
-    
-    def apply_adapters(
-        self, 
-        level: str, 
-        module_outputs: Dict[str, np.ndarray]
-    ) -> Dict[str, np.ndarray]:
-        """Apply all adapters for a level to module outputs."""
-        adapted = {}
-        for module, output in module_outputs.items():
-            adapter = self.get_adapter(level, module)
-            if adapter is not None:
-                adapted[module] = adapter.forward(output)
-            else:
-                adapted[module] = output
-        return adapted
-    
+        return self.adapters.get((level, module))
+
+    def apply_lora(self, level: str, module: str, x: List[List[List[float]]]) -> List[List[List[float]]]:
+        adapter = self.get_adapter(level, module)
+        if adapter is None:
+            return x
+        return adapter.forward(x)
+
+    def merge_all(self, base_weights_by_level: Dict[str, Dict[str, List[List[float]]]]) -> Dict[str, Dict[str, List[List[float]]]]:
+        merged: Dict[str, Dict[str, List[List[float]]]] = {}
+        for level, base in base_weights_by_level.items():
+            for module in ("projection", "error", "action"):
+                adapter = self.get_adapter(level, module)
+                if adapter:
+                    base = adapter.merge_into(base)
+            merged[level] = base
+        return merged
+
     def compute_gradients(
         self,
         level: str,
         module: str,
-        input_activations: np.ndarray,  # (batch, seq, d_model)
-        output_gradients: np.ndarray,    # (batch, seq, d_model) - gradient of loss w.r.t output
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute gradients for LoRA adapter weights.
-        
-        LoRA: output = x + alpha * (x @ A @ B)
-        dL/dA = alpha * (x.T @ dL/doutput @ B.T)
-        dL/dB = alpha * (x @ A).T @ dL/doutput
+        input_activations: List[List[List[float]]],
+        grad_output: List[List[List[float]]],
+    ) -> Optional[Tuple[List[List[float]], List[List[float]]]]:
+        """Gradients of the LoRA loss w.r.t. A and B.
+
+        forward: ``h = x @ A``  (N, r);  out = x + alpha * (h @ B)  (N, d)
+        grad_B = alpha * h.T @ grad_output          (r, d)
+        grad_A = alpha * x.T @ (grad_output @ B.T)  (d, r)
         """
         adapter = self.get_adapter(level, module)
         if adapter is None:
-            return None, None
-        
-        # x: (batch*seq, d_model) - flatten batch and seq
-        x = input_activations.reshape(-1, input_activations.shape[-1])
-        # grad_output: (batch*seq, d_model)
-        grad_out = output_gradients.reshape(-1, output_gradients.shape[-1])
-        
-        # x @ A: (batch*seq, rank)
-        xA = x @ adapter.A
-        
-        # dL/dB = alpha * (xA).T @ grad_out
-        # (rank, batch*seq) @ (batch*seq, d_model) = (rank, d_model)
-        grad_B = adapter.alpha * (xA.T @ grad_out)
-        
-        # dL/dA = alpha * x.T @ (grad_out @ B.T)
-        # (d_model, batch*seq) @ (batch*seq, rank) = (d_model, rank)
-        grad_A = adapter.alpha * (x.T @ (grad_out @ adapter.B.T))
-        
-        return grad_A, grad_B
-    
+            return None
+        last = adapter.layer.input_dim
+        flat = flatten_3d(input_activations)          # (N, d)
+        gflat = flatten_3d(grad_output)               # (N, d)
+        xT = transpose(flat)                          # (d, N)
+        h = matmul(flat, adapter.layer.A)             # (N, r)
+        hT = transpose(h)                             # (r, N)
+        grad_B = matmul(hT, gflat)                    # (r, d)
+        gBt = matmul(gflat, transpose(adapter.layer.B))  # (N, r)
+        grad_A = matmul(xT, gBt)                      # (d, r)
+        alpha = adapter.layer.alpha
+        return _scale_2d(grad_A, alpha), _scale_2d(grad_B, alpha)
+
+    def apply_correction(
+        self,
+        level: str,
+        module: str,
+        input_activations: List[List[List[float]]],
+        grad_output: List[List[List[float]]],
+    ) -> None:
+        grads = self.compute_gradients(level, module, input_activations, grad_output)
+        if grads is None:
+            return
+        grad_A, grad_B = grads
+        lr = self.config.learning_rate
+        adapter = self.get_adapter(level, module)
+        A = adapter.layer.A
+        B = adapter.layer.B
+        for i in range(len(A)):
+            for j in range(len(A[0])):
+                A[i][j] -= lr * clip(grad_A[i][j], -1.0, 1.0)
+        for i in range(len(B)):
+            for j in range(len(B[0])):
+                B[i][j] -= lr * clip(grad_B[i][j], -1.0, 1.0)
+
+    def _find_adapter(self, level: str) -> Optional[LoRAAdapter]:
+        """Find any adapter registered for ``level`` (module-name agnostic)."""
+        for (lvl, _mod), adapter in self.adapters.items():
+            if lvl == level:
+                return adapter
+        return None
+
     def update_adapters(
         self,
         level: str,
         module: str,
-        grad_A: np.ndarray,
-        grad_B: np.ndarray,
+        grad_A: List[List[float]],
+        grad_B: List[List[float]],
     ) -> None:
-        """Update adapter weights with gradients."""
+        """Update adapter weights with gradients (clipped, lr-scaled)."""
         adapter = self.get_adapter(level, module)
         if adapter is None:
             return
-        
-        adapter.A -= self.learning_rate * grad_A
-        adapter.B -= self.learning_rate * grad_B
-    
+        lr = self.config.learning_rate
+        A = adapter.layer.A
+        B = adapter.layer.B
+        for i in range(len(A)):
+            for j in range(len(A[0])):
+                A[i][j] -= lr * clip(grad_A[i][j], -1.0, 1.0)
+        for i in range(len(B)):
+            for j in range(len(B[0])):
+                B[i][j] -= lr * clip(grad_B[i][j], -1.0, 1.0)
+
     def train_step(
         self,
         level: str,
         module: str,
-        input_activations: np.ndarray,
-        target_activations: np.ndarray,
+        input_activations: List[List[List[float]]],
+        target_activations: List[List[List[float]]],
     ) -> float:
-        """Single training step: minimize MSE between adapted output and target."""
-        adapter = self.get_adapter(level, module)
+        """Single training step: minimise MSE between adapted output and target.
+
+        Module names are matched loosely (e.g. ``q_proj`` maps to the level's
+        registered adapter) so sleep replay trains whatever adapter exists.
+        """
+        adapter = self.get_adapter(level, module) or self._find_adapter(level)
         if adapter is None:
             return 0.0
-        
-        # Forward
+
         output = adapter.forward(input_activations)
-        
-        # Loss: MSE
-        diff = output - target_activations
-        loss = float(np.mean(diff ** 2))
-        
-        # Gradients
-        grad_out = 2.0 * diff / diff.size  # dL/doutput
-        grad_A, grad_B = self.compute_gradients(level, module, input_activations, grad_out)
-        
-        if grad_A is not None:
-            self.update_adapters(level, module, grad_A, grad_B)
-        
+        diff = sub(output, target_activations)
+        loss = mse_3d(output, target_activations)
+
+        n = max(1, count_3d(diff))
+        grad_output = [[[2.0 * v / n for v in row] for row in batch] for batch in diff]
+        self.apply_correction(adapter.level, adapter.module, input_activations, grad_output)
         return loss
-    
-    def save_checkpoint(self, step: int, suffix: str = "") -> str:
-        """Save all adapters to disk."""
-        import pickle
-        
-        filename = f"lora_step_{step}{suffix}.pkl"
-        filepath = os.path.join(self.checkpoint_dir, filename)
-        
-        # Convert to serializable format
-        serializable = {}
-        for level, modules in self.adapters.items():
-            serializable[level] = {}
-            for module, adapter in modules.items():
-                serializable[level][module] = {
-                    "name": adapter.name,
-                    "rank": adapter.rank,
-                    "alpha": adapter.alpha,
-                    "A": adapter.A,
-                    "B": adapter.B,
-                    "dropout": adapter.dropout,
-                }
-        
-        with open(filepath, "wb") as f:
-            pickle.dump({
-                "step": step,
-                "config": {
-                    "rank": self.config.rank,
-                    "alpha": self.config.alpha,
-                    "dropout": self.config.dropout,
-                    "target_modules": self.config.target_modules,
-                },
-                "adapters": serializable,
-            }, f)
-        
-        return filepath
-    
-    def load_checkpoint(self, filepath: str) -> int:
-        """Load adapters from disk."""
-        import pickle
-        
-        with open(filepath, "rb") as f:
-            data = pickle.load(f)
-        
-        # Restore config
-        self.config.rank = data["config"]["rank"]
-        self.config.alpha = data["config"]["alpha"]
-        self.config.dropout = data["config"]["dropout"]
-        self.config.target_modules = data["config"]["target_modules"]
-        
-        # Restore adapters
-        self.adapters = {}
-        for level, modules in data["adapters"].items():
-            self.adapters[level] = {}
-            for module, adapter_data in modules.items():
-                self.adapters[level][module] = LoRAAdapter(
-                    name=adapter_data["name"],
-                    rank=adapter_data["rank"],
-                    alpha=adapter_data["alpha"],
-                    A=adapter_data["A"],
-                    B=adapter_data["B"],
-                    dropout=adapter_data["dropout"],
-                )
-        
-        return data["step"]
-    
-    def list_checkpoints(self) -> List[str]:
-        """List available checkpoints."""
-        files = [f for f in os.listdir(self.checkpoint_dir) if f.endswith(".pkl")]
-        files.sort(key=lambda x: int(x.split("_")[2].split(".")[0]) if "_" in x else 0)
-        return [os.path.join(self.checkpoint_dir, f) for f in files]
-    
-    def merge_into_base_weights(self, base_weights: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """Merge all adapters into base weight matrices.
-        
-        base_weights: {level_module: weight_matrix}
-        Returns merged weights.
-        """
-        merged = {}
-        for level, modules in self.adapters.items():
-            for module, adapter in modules.items():
-                key = f"{level}_{module}"
-                if key in base_weights:
-                    merged[key] = adapter.merge_into(base_weights[key])
-                else:
-                    merged[key] = adapter.A @ adapter.B * adapter.alpha
-        return merged
 
 
-def create_lora_manager(
-    level_dims: Dict[str, int],
-    checkpoint_dir: str = "./lucy_core/checkpoints/lora_adapters",
-) -> LoRAAdapterManager:
-    """Factory for LoRA manager."""
-    return LoRAAdapterManager(level_dims, checkpoint_dir=checkpoint_dir)
+def _scale_2d(m: List[List[float]], s: float) -> List[List[float]]:
+    return [[v * s for v in row] for row in m]

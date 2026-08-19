@@ -16,9 +16,9 @@ Devotional states modulate precision across the hierarchy:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
-import numpy as np
+from typing import Dict, List, Optional
 
+from lucy_core._linalg import clip, norm
 from lucy_core.devotional.states import DevotionalState
 from lucy_core.brain.hierarchical import PredictionLevel
 
@@ -117,7 +117,7 @@ class PrecisionController:
     def compute_precisions(
         self,
         devotional_state: str,
-        prediction_errors: Dict[PredictionLevel, np.ndarray],
+        prediction_errors: Dict[PredictionLevel, List[float]],
     ) -> Dict[PredictionLevel, float]:
         """Compute precision for each level given devotional state and errors."""
         
@@ -132,7 +132,7 @@ class PrecisionController:
             error = prediction_errors.get(level)
             
             if error is not None:
-                error_magnitude = float(np.linalg.norm(error))
+                error_magnitude = float(norm(error))
                 
                 # Precision modulation based on error
                 # High error + high sensitivity → lower precision (more learning)
@@ -148,7 +148,7 @@ class PrecisionController:
                 precision = base_precision
             
             # Clamp to valid range
-            precisions[level] = float(np.clip(precision, 0.05, 1.0))
+            precisions[level] = float(clip(precision, 0.05, 1.0))
         
         return precisions
     
@@ -174,7 +174,7 @@ class PrecisionController:
         }.get(state, 0.5)
         
         # Action precision = base * alignment
-        return float(np.clip(base * action_alignment, 0.1, 1.0))
+        return float(clip(base * action_alignment, 0.1, 1.0))
     
     def get_profile(self, state: DevotionalState) -> DevotionalPrecisionProfile:
         """Get precision profile for a state."""

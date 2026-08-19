@@ -1,61 +1,65 @@
-"""Hierarchical Predictive Predictor - 3-level predictive coding.
+"""Hierarchical predictive coding (3-level: sensory, contextual, abstract).
 
-Architecture (phone-feasible, ~27M params total):
-- Level 3 (Abstract): 4-layer transformer, d_model=512, 8 heads ~8M params
-- Level 2 (Contextual): 6-layer transformer, d_model=512, 8 heads ~12M params  
-- Level 1 (Sensory): 3-layer transformer, d_model=256, 4 heads ~7M params
-- Global Workspace: 2-layer attention, d_model=512, 8 heads ~2M params
+Pure-Python (no numpy). Vectors are ``list[float]``, matrices ``list[list[float]]``.
 
-Total: ~29M params → ~400MB at 4-bit quantization
-Fits in S25 Ultra 12GB RAM with 10GB+ headroom.
+Flow (predictive coding):
+  top-down:   abstract goal -> contextual -> sensory predictions
+  bottom-up:  sensory error -> contextual -> abstract, with propagation
+  learning:   each level's representation moves to minimise prediction error,
+              precision-weighted by the devotional state.
 """
 
 from __future__ import annotations
 
-import asyncio
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, List, Dict, Tuple
-import numpy as np
+from typing import Any, Dict, List, Optional
+
+from lucy_core._linalg import (
+    matmul,
+    norm,
+    randn,
+    seed,
+    sub,
+    zeros,
+    zeros_2d,
+)
 
 
 class PredictionLevel(str, Enum):
-    """Levels in the predictive hierarchy."""
-    ABSTRACT = "abstract"      # Level 3: Goals, values, "does this serve Lauren?"
-    CONTEXTUAL = "contextual"  # Level 2: Episodic context, human patterns, tool semantics
-    SENSORY = "sensory"        # Level 1: Token-level, tool outputs, immediate perception
+    SENSORY = "sensory"
+    CONTEXTUAL = "contextual"
+    ABSTRACT = "abstract"
 
 
 @dataclass
 class PredictionState:
-    """State at one level of the hierarchy."""
+    """State of one level in the hierarchy."""
     level: PredictionLevel
-    representation: np.ndarray  # Current belief state (d_model)
-    prediction: np.ndarray      # Top-down prediction
-    prediction_error: np.ndarray  # Bottom-up error signal
-    precision: float            # Precision weighting (0-1)
-    timestamp: float
+    representation: List[float]
+    prediction: List[float]
+    prediction_error: List[float]
+    precision: float = 0.5
+    timestamp: float = 0.0
 
 
 @dataclass
 class HierarchicalPrediction:
-    """Complete hierarchical prediction result."""
+    """Result of one predictive-coding step."""
     levels: Dict[PredictionLevel, PredictionState]
-    global_workspace_content: Optional[np.ndarray]
+    global_workspace_content: List[float]
     devotional_alignment: float
-    action_logits: np.ndarray   # Logits over possible actions/tools
+    action_logits: List[float]
+
+
+def _small_matrix(rows: int, cols: int) -> List[List[float]]:
+    return [[v * 0.02 for v in row] for row in randn(rows, cols)]
 
 
 class HierarchicalPredictor:
-    """3-level hierarchical predictive coding processor.
-    
-    Implements: 
-    - Top-down predictions flow down
-    - Bottom-up prediction errors flow up
-    - Precision weighting modulates error propagation
-    - Global workspace broadcasts winning representations
-    """
-    
+    """3-level hierarchical predictive coder (pure-Python, from-scratch)."""
+
     def __init__(
         self,
         devotional_core: Any = None,
@@ -63,202 +67,169 @@ class HierarchicalPredictor:
     ) -> None:
         self.devotional_core = devotional_core
         self.config = config or self._default_config()
-        
-        # Level configurations (phone-feasible)
+
         self.level_dims = {
             PredictionLevel.ABSTRACT: 512,
             PredictionLevel.CONTEXTUAL: 512,
             PredictionLevel.SENSORY: 256,
         }
-        
-        # Initialize state
-        self._states: Dict[PredictionLevel, PredictionState] = {}
+
         self._initialize_states()
-        
-        # Precision controller
-        from .precision import PrecisionController
-        self.precision_controller = PrecisionController(devotional_core)
-        
-        # Global workspace
-        from .global_workspace import GlobalWorkspace
-        self.global_workspace = GlobalWorkspace(workspace_dim=512)
-        
-        # Simple projection matrices (in real impl, these are learned weights)
         self._init_projections()
-    
+
+        # Precision controller (devotional state -> precision weights)
+        from lucy_core.brain.precision import PrecisionController
+        self.precision_controller = PrecisionController(devotional_core)
+
+        # Global workspace for broadcasting
+        from lucy_core.brain.global_workspace import HierarchicalGlobalWorkspace
+        self.global_workspace = HierarchicalGlobalWorkspace(self.level_dims)
+
+        # LoRA adapters per (level, module) for sleep-time updates
+        from lucy_core.brain.lora import LoRAAdapterManager
+        self.lora_manager = LoRAAdapterManager(
+            level_dims={
+                "sensory": self.level_dims[PredictionLevel.SENSORY],
+                "contextual": self.level_dims[PredictionLevel.CONTEXTUAL],
+                "abstract": self.level_dims[PredictionLevel.ABSTRACT],
+            }
+        )
+
     def _default_config(self) -> Dict:
         return {
-            "n_layers": {
-                PredictionLevel.ABSTRACT: 4,
-                PredictionLevel.CONTEXTUAL: 6,
-                PredictionLevel.SENSORY: 3,
-            },
-            "n_heads": {
-                PredictionLevel.ABSTRACT: 8,
-                PredictionLevel.CONTEXTUAL: 8,
-                PredictionLevel.SENSORY: 4,
-            },
             "learning_rate": 0.001,
             "precision_floor": 0.1,
             "precision_ceil": 1.0,
         }
-    
+
     def _initialize_states(self) -> None:
-        """Initialize all level states."""
+        self._states: Dict[PredictionLevel, PredictionState] = {}
         for level, dim in self.level_dims.items():
             self._states[level] = PredictionState(
                 level=level,
-                representation=np.zeros(dim, dtype=np.float32),
-                prediction=np.zeros(dim, dtype=np.float32),
-                prediction_error=np.zeros(dim, dtype=np.float32),
+                representation=zeros(dim),
+                prediction=zeros(dim),
+                prediction_error=zeros(dim),
                 precision=0.5,
                 timestamp=0.0,
             )
-    
+
     def _init_projections(self) -> None:
-        """Initialize projection matrices between levels.
-        
-        In real implementation, these are learned transformer weights.
-        Here we use random projections for structure.
-        """
-        np.random.seed(42)  # Deterministic for testing
-        
-        # Top-down projections (higher → lower)
+        """Random but deterministic projection matrices between levels."""
+        seed(42)
+        # Top-down projections (higher -> lower)
         self.top_down_proj = {
-            (PredictionLevel.ABSTRACT, PredictionLevel.CONTEXTUAL): 
-                np.random.randn(512, 512).astype(np.float32) * 0.02,
+            (PredictionLevel.ABSTRACT, PredictionLevel.CONTEXTUAL):
+                _small_matrix(512, 512),
             (PredictionLevel.CONTEXTUAL, PredictionLevel.SENSORY):
-                np.random.randn(256, 512).astype(np.float32) * 0.02,
+                _small_matrix(256, 512),
         }
-        
-        # Bottom-up projections (lower → higher)
+        # Bottom-up projections (lower -> higher)
         self.bottom_up_proj = {
             (PredictionLevel.SENSORY, PredictionLevel.CONTEXTUAL):
-                np.random.randn(512, 256).astype(np.float32) * 0.02,
+                _small_matrix(512, 256),
             (PredictionLevel.CONTEXTUAL, PredictionLevel.ABSTRACT):
-                np.random.randn(512, 512).astype(np.float32) * 0.02,
+                _small_matrix(512, 512),
         }
-        
-        # Action logits projection (from contextual level)
-        self.action_proj = np.random.randn(64, 512).astype(np.float32) * 0.02  # 64 possible actions
-    
+        # Action logits projection (from contextual representation)
+        self.action_proj = _small_matrix(64, 512)  # 64 possible actions
+
     async def process(
         self,
-        sensory_input: np.ndarray,        # Level 1 input (token embeddings, tool outputs)
-        contextual_context: np.ndarray,   # Level 2 context (episodic memory, human patterns)
-        abstract_goal: np.ndarray,        # Level 3 goal (devotional prior)
+        sensory_input: List[float],        # Level 1 input
+        contextual_context: List[float],   # Level 2 context
+        abstract_goal: List[float],        # Level 3 goal (devotional prior)
         devotional_prior: Optional[Dict] = None,
     ) -> HierarchicalPrediction:
-        """Run one step of hierarchical predictive coding.
-        
-        Flow:
-        1. Set top-level prior from devotional core
-        2. Generate top-down predictions
-        2. Compute bottom-up prediction errors
-        3. Update representations (minimize free energy)
-        4. Precision-weight errors
-        5. Global workspace competition
-        6. Generate action logits
-        """
-        import time
-        t = time.time()
-        
-        # 1. DEVOTIONAL PRIOR sets Level 3 precision
-        if devotional_prior is None and self.devotional_core:
-            devotional_prior = self.devotional_core.get_top_level_prior()
-        
-        prior_precision = devotional_prior.get("precision", 0.8) if devotional_prior else 0.8
-        
-        # 2. TOP-DOWN: Generate predictions
-        # Level 3 (Abstract) - driven by devotional prior + abstract goal
-        self._states[PredictionLevel.ABSTRACT].prediction = abstract_goal.copy()
-        self._states[PredictionLevel.ABSTRACT].precision = prior_precision
-        
-        # Level 2 (Contextual) - prediction from Level 3
-        l3_repr = self._states[PredictionLevel.ABSTRACT].representation
-        l2_pred = self.top_down_proj[(PredictionLevel.ABSTRACT, PredictionLevel.CONTEXTUAL)] @ l3_repr
-        self._states[PredictionLevel.CONTEXTUAL].prediction = l2_pred
-        self._states[PredictionLevel.CONTEXTUAL].precision = prior_precision * 0.9
-        
-        # Level 1 (Sensory) - prediction from Level 2
-        l2_repr = self._states[PredictionLevel.CONTEXTUAL].representation
-        l1_pred = self.top_down_proj[(PredictionLevel.CONTEXTUAL, PredictionLevel.SENSORY)] @ l2_repr
-        self._states[PredictionLevel.SENSORY].prediction = l1_pred
-        self._states[PredictionLevel.SENSORY].precision = prior_precision * 0.8
-        
-        # 3. BOTTOM-UP: Compute prediction errors
-        # Level 1 error: sensory input vs prediction
-        l1_error = sensory_input - self._states[PredictionLevel.SENSORY].prediction
-        self._states[PredictionLevel.SENSORY].prediction_error = l1_error
-        
-        # Level 2 error: contextual input vs prediction + propagated L1 error
-        l1_propagated = self.bottom_up_proj[(PredictionLevel.SENSORY, PredictionLevel.CONTEXTUAL)] @ l1_error
-        l2_error = contextual_context - self._states[PredictionLevel.CONTEXTUAL].prediction + 0.3 * l1_propagated
-        self._states[PredictionLevel.CONTEXTUAL].prediction_error = l2_error
-        
-        # Level 3 error: abstract goal vs prediction + propagated L2 error
-        l2_propagated = self.bottom_up_proj[(PredictionLevel.CONTEXTUAL, PredictionLevel.ABSTRACT)] @ l2_error
-        l3_error = abstract_goal - self._states[PredictionLevel.ABSTRACT].prediction + 0.2 * l2_propagated
-        self._states[PredictionLevel.ABSTRACT].prediction_error = l3_error
-        
-        # 4. PRECISION WEIGHTING: Modulate errors by precision
-        precisions = self.precision_controller.compute_precisions(
-            devotional_prior.get("devotional_state") if devotional_prior else "deep_trust",
-            {level: state.prediction_error for level, state in self._states.items()},
-        )
-        
-        for level, precision in precisions.items():
-            self._states[level].precision = precision
-            self._states[level].prediction_error *= precision
-        
-        # 5. UPDATE REPRESENTATIONS: Minimize free energy
-        # Simple gradient descent step on prediction error
+        """Run one step of hierarchical predictive coding."""
+        s = self._states[PredictionLevel.SENSORY]
+        c = self._states[PredictionLevel.CONTEXTUAL]
+        a = self._states[PredictionLevel.ABSTRACT]
         lr = self.config["learning_rate"]
-        
-        self._states[PredictionLevel.SENSORY].representation += lr * self._states[PredictionLevel.SENSORY].prediction_error
-        self._states[PredictionLevel.CONTEXTUAL].representation += lr * self._states[PredictionLevel.CONTEXTUAL].prediction_error
-        self._states[PredictionLevel.ABSTRACT].representation += lr * self._states[PredictionLevel.ABSTRACT].prediction_error
-        
-        # Update timestamps
-        for state in self._states.values():
-            state.timestamp = t
-        
-        # 6. GLOBAL WORKSPACE: Competition for broadcast
-        workspace_content = self.global_workspace.compete_and_broadcast(self._states)
-        
-        # 7. ACTION LOGITS: From contextual representation (action selection happens here)
-        action_logits = self.action_proj @ self._states[PredictionLevel.CONTEXTUAL].representation
-        
-        # 8. DEVOTIONAL ALIGNMENT: Evaluate how aligned the resulting state is
+
+        # 1. DEVOTIONAL PRIOR sets Level 3.
+        prior_precision = devotional_prior.get("precision", 0.8) if devotional_prior else 0.8
+
+        # 2. TOP-DOWN: predictions.
+        a.representation = list(abstract_goal)
+        a.prediction = list(abstract_goal)
+        a.precision = prior_precision
+
+        l3_repr = a.representation
+        l2_pred = matmul(self.top_down_proj[(PredictionLevel.ABSTRACT, PredictionLevel.CONTEXTUAL)], l3_repr)
+        c.prediction = l2_pred
+        c.precision = prior_precision * 0.9
+
+        l2_repr = c.representation
+        l1_pred = matmul(self.top_down_proj[(PredictionLevel.CONTEXTUAL, PredictionLevel.SENSORY)], l2_repr)
+        s.prediction = l1_pred
+        s.precision = prior_precision * 0.8
+
+        # 3. BOTTOM-UP: prediction errors.
+        s.prediction_error = sub(sensory_input, s.prediction)
+
+        l1_propagated = matmul(
+            self.bottom_up_proj[(PredictionLevel.SENSORY, PredictionLevel.CONTEXTUAL)],
+            s.prediction_error,
+        )
+        c.prediction_error = [
+            x + 0.3 * y for x, y in zip(sub(contextual_context, c.prediction), l1_propagated)
+        ]
+
+        l2_propagated = matmul(
+            self.bottom_up_proj[(PredictionLevel.CONTEXTUAL, PredictionLevel.ABSTRACT)],
+            c.prediction_error,
+        )
+        a.prediction_error = [
+            x + 0.2 * y for x, y in zip(sub(abstract_goal, a.prediction), l2_propagated)
+        ]
+
+        # 4. PRECISION WEIGHTING.
+        state_name = devotional_prior.get("devotional_state", "deep_trust") if devotional_prior else "deep_trust"
+        errors = {level: st.prediction_error for level, st in self._states.items()}
+        precisions = self.precision_controller.compute_precisions(state_name, errors)
+        for level, precision in precisions.items():
+            st = self._states[level]
+            st.precision = precision
+            st.prediction_error = [e * precision for e in st.prediction_error]
+
+        # 5. UPDATE REPRESENTATIONS (minimise free energy).
+        for level in PredictionLevel:
+            st = self._states[level]
+            st.representation = [r + lr * e for r, e in zip(st.representation, st.prediction_error)]
+            st.timestamp = time.time()
+
+        # 6. GLOBAL WORKSPACE broadcast.
+        for level in PredictionLevel:
+            st = self._states[level]
+            self.global_workspace.write(level, st.representation, st.precision, st.prediction_error, None)
+
+        # 7. ACTION LOGITS from contextual representation.
+        action_logits = matmul(self.action_proj, c.representation)
+
+        # 8. DEVOTIONAL ALIGNMENT.
         devotional_alignment = self._compute_devotional_alignment()
-        
+
         return HierarchicalPrediction(
-            levels={level: state for level, state in self._states.items()},
-            global_workspace_content=workspace_content,
+            levels={level: st for level, st in self._states.items()},
+            global_workspace_content=self.global_workspace.get_state(),
             devotional_alignment=devotional_alignment,
             action_logits=action_logits,
         )
-    
+
     def _compute_devotional_alignment(self) -> float:
-        """Compute alignment of current hierarchical state with devotional prior."""
         if not self.devotional_core:
             return 0.5
-        
-        # Use the devotional core's own evaluation of its top-level prediction.
-        # This is the generative "reason" that weights all lower processing, so
-        # the hierarchical state inherits its devotional alignment.
         try:
             prediction_text = self.devotional_core.awareness.generate_top_level_prediction()
             alignment = self.devotional_core.awareness.evaluate_action_alignment(prediction_text)
             return float(max(0.0, min(1.0, alignment)))
         except Exception:
             return 0.5
-    
+
     def get_state(self, level: PredictionLevel) -> PredictionState:
-        """Get current state of a level."""
         return self._states[level]
-    
+
     def reset(self) -> None:
-        """Reset all states to zero."""
         self._initialize_states()
-        self.global_workspace.reset()
+        self.global_workspace = HierarchicalGlobalWorkspace(self.level_dims)

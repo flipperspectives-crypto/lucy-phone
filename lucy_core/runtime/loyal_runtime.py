@@ -15,7 +15,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional, List, Dict
-import numpy as np
 
 from lucy_edge.agent.executor import Executor, StepResult
 from lucy_edge.agent.limits import AgentLimits
@@ -239,35 +238,34 @@ class LoyalAgentRuntime:
             config=lora_config,
         )
     
-    def _build_sensory_input(self) -> np.ndarray:
-        """Build sensory input vector from current context."""
-        # Simple embedding: hash goal + context into fixed-dim vector
+    def _hash_to_vec(self, text: str, dim: int) -> List[float]:
+        """Deterministic pure-Python embedding: hash text to a fixed-dim vector."""
         import hashlib
-        text = f"{self.goal} {self.context}" if self.context else self.goal
         hash_bytes = hashlib.md5(text.encode()).digest()
-        # Expand to 256 dimensions
-        vec = np.frombuffer(hash_bytes, dtype=np.uint8).astype(np.float32)
-        vec = np.tile(vec, 16)[:256]  # 16 * 16 = 256
-        return vec / 255.0  # Normalize
-    
-    def _build_contextual_context(self) -> np.ndarray:
+        base = [float(b) for b in hash_bytes]  # 16 values in [0, 255]
+        tiled: List[float] = []
+        while len(tiled) < dim:
+            tiled.extend(base)
+        return [v / 255.0 for v in tiled[:dim]]  # Normalize to [0, 1]
+
+    def _build_sensory_input(self) -> List[float]:
+        """Build sensory input vector from current context."""
+        text = f"{self.goal} {self.context}" if self.context else self.goal
+        return self._hash_to_vec(text, 256)
+
+    def _build_contextual_context(self) -> List[float]:
         """Build contextual context from memory retrieval."""
         # If we have memory retrieval, use it; otherwise zeros
         if self.memory_retrieval:
             # In real impl: query memory for relevant context
             pass
-        return np.zeros(512, dtype=np.float32)
-    
-    def _build_abstract_goal(self) -> np.ndarray:
+        return [0.0] * 512
+
+    def _build_abstract_goal(self) -> List[float]:
         """Build abstract goal vector from devotional prior."""
         prior = self.devotional_core.get_top_level_prior(f"goal: {self.goal}")
-        # Encode devotional state + goal into 512-dim vector
-        import hashlib
         text = f"{prior['devotional_state']} {self.goal} {prior['prediction']}"
-        hash_bytes = hashlib.md5(text.encode()).digest()
-        vec = np.frombuffer(hash_bytes, dtype=np.uint8).astype(np.float32)
-        vec = np.tile(vec, 32)[:512]  # 32 * 16 = 512
-        return vec / 255.0
+        return self._hash_to_vec(text, 512)
     
     async def _generate_predictive_plan(self, top_prior: Dict) -> Plan:
         """Generate plan using hierarchical predictive coding."""
