@@ -289,6 +289,10 @@ class TestIntrospectionAdversarial(unittest.TestCase):
             status, prov = check_training(cp, str(ledger_db))
             self.assertEqual(status, "AVAILABLE")
             self.assertNotIn("git_hash", prov)
+            # The phantom run_id must NOT leak into provenance: a checkpoint whose
+            # embedded lineage_run_id has no matching ledger row resolves to honest
+            # absence, never to a fabricated or stale attribution.
+            self.assertNotIn("lineage_run_id", prov)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
