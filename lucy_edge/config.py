@@ -28,9 +28,9 @@ DEFAULT_DATA_DIR = "data"
 
 def _default_host_id() -> str:
     try:
-        import socket
+        import platform
 
-        return socket.gethostname() or "unknown-host"
+        return platform.node() or "unknown-host"
     except Exception:
         return "unknown-host"
 

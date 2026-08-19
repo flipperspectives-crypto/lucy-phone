@@ -262,30 +262,3 @@ class HierarchicalPredictor:
         """Reset all states to zero."""
         self._initialize_states()
         self.global_workspace.reset()
-
-
-# For ONNX export / inference optimization
-class OptimizedHierarchicalPredictor:
-    """Optimized version for NPU inference (INT4 quantized).
-    
-    This would be the exported ONNX model, not the Python training version.
-    """
-    
-    def __init__(self, model_path: str):
-        self.model_path = model_path
-        # In real impl: load ONNX Runtime session with QNN delegate
-        self.session = None
-    
-    async def infer(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """Run inference on NPU."""
-        # Placeholder for actual ONNX Runtime call
-        # return self.session.run(None, inputs)
-        raise NotImplementedError("ONNX Runtime integration needed")
-
-
-def create_predictor_for_export() -> HierarchicalPredictor:
-    """Create predictor instance for ONNX export."""
-    predictor = HierarchicalPredictor()
-    # Set to eval mode (no learning rate updates during export)
-    predictor.config["learning_rate"] = 0.0
-    return predictor
