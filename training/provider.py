@@ -23,7 +23,7 @@ from lucy_edge.providers.base import (
 )
 
 from .tiny_transformer import TinyTransformer
-from .tokenizer import ByteTokenizer
+from .tokenizer import ByteTokenizer, BPETokenizer
 
 
 class LocalLucyProvider(BaseProvider):
@@ -60,6 +60,13 @@ class LocalLucyProvider(BaseProvider):
                 ff_mult=sd["ff"],
             )
             self._model.load_state_dict(sd)
+            # Reconstruct the exact tokenizer used in training from the checkpoint,
+            # so generated text uses the same vocabulary. Falls back to the byte
+            # tokenizer for legacy checkpoints that carry no tokenizer state.
+            if "tokenizer" in sd:
+                self._tok = BPETokenizer.from_state_dict(sd["tokenizer"])
+            else:
+                self._tok = ByteTokenizer()
             self._loaded = True
         return self._model  # type: ignore[return-value]
 
@@ -142,7 +149,7 @@ class LocalLucyProvider(BaseProvider):
     # --- inference ---------------------------------------------------------
     def _generate_tokens(self, prompt: str, max_new: int = 24, temperature: float = 0.0) -> list[int]:
         m = self._ensure_loaded()
-        ids = self._tok.encode(prompt.encode("utf-8", "replace"))
+        ids = self._tok.encode(prompt)
         ctx_ids = ids[-m.ctx :] if len(ids) >= m.ctx else ids
         generated: list[int] = []
         import math as _math

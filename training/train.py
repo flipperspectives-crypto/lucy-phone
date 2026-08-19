@@ -21,7 +21,7 @@ from typing import Optional
 from .corpus import curate
 from .lineage import LineageLedger, STATUS_DONE, STATUS_FAILED
 from .tiny_transformer import TinyTransformer
-from .tokenizer import ByteTokenizer
+from .tokenizer import ByteTokenizer, BPETokenizer
 
 
 def _window_corpus(token_ids: list[int], ctx: int, stride: int) -> list[list[int]]:
@@ -70,7 +70,6 @@ def train(
 
     Returns a summary dict (also recorded in the lineage ledger).
     """
-    tok = ByteTokenizer()
     if corpus_text is not None:
         # synthetic / test corpus: train on caller-supplied text instead of the
         # repo's own foundation texts (used by the synthetic pattern-learning test)
@@ -80,7 +79,12 @@ def train(
         corpus = curate(repo_root)
         text = corpus.text
         data_sha = corpus.sha256()
-    token_ids = tok.encode(text.encode("utf-8", "replace"))
+    # Learned, in-house BPE tokenizer (no external vocab, nothing fetched). Trained
+    # solely on the corpus we are about to train on, so the vocabulary is fully
+    # owned-local and reproducible from the checkpoint.
+    tok = BPETokenizer(target_vocab=512)
+    tok.train([text])
+    token_ids = tok.encode(text)
     if not token_ids:
         raise RuntimeError("corpus is empty; nothing to train on")
 
@@ -184,6 +188,9 @@ def train(
         # produced it, so introspection can resolve provenance by run_id instead
         # of guessing by filename (which misattributes the live latest.json).
         best_sd["lineage_run_id"] = run.run_id
+        # Serialize the learned tokenizer into the checkpoint so inference can
+        # reconstruct the exact vocabulary with nothing fetched or imported.
+        best_sd["tokenizer"] = tok.state_dict()
         per_run_path.write_text(json.dumps(best_sd))
         latest_path.write_text(json.dumps(best_sd))
         note = f"ok; val_loss={val_loss:.4f}" if val_loss is not None else "ok"

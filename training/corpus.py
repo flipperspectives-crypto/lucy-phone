@@ -29,8 +29,18 @@ ALLOWED_SOURCES = [
     "lucy_edge/foundation/audit.py",
     "lucy_core/devotional/states.py",
     "lucy_core/devotional/guards.py",
+    "lucy_core/devotional/core.py",
+    "lucy_core/devotional/morning_review.py",
+    "lucy_core/brain/planning.py",
+    "lucy_core/brain/hierarchical.py",
+    "lucy_core/brain/lora.py",
+    "lucy_core/brain/precision.py",
+    "lucy_core/brain/global_workspace.py",
+    "lucy_core/sleep/orchestrator.py",
     "lucy_edge/introspection/capabilities.py",
+    "lucy_edge/introspection/runtime_report.py",
     "lucy_edge/version.py",
+    "training/CHARTER.md",
     "CHECKPOINT.md",
 ]
 

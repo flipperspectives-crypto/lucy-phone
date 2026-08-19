@@ -262,6 +262,81 @@ class ByteTokenizer:
         return bytes(b & 0xFF for b in ids).decode("utf-8", errors="replace")
 
 
+class BPETokenizer:
+    """Learned byte-level BPE tokenizer (standalone mirror of training/tokenizer.py).
+
+    Reconstructed from the checkpoint's ``tokenizer`` state so on-device inference
+    uses the exact vocabulary the model was trained with -- no external vocab, no
+    network. Pure stdlib only.
+    """
+
+    def __init__(self, target_vocab=1024):
+        self.base = 256
+        self.target_vocab = target_vocab
+        self.merges = []
+        self._id_to_bytes = {}
+        self._merge_lookup = {}
+
+    def _build_index(self):
+        self._id_to_bytes = {i: bytes([i]) for i in range(self.base)}
+        for idx, (a, b) in enumerate(self.merges):
+            self._id_to_bytes[self.base + idx] = (
+                self._id_to_bytes[a] + self._id_to_bytes[b]
+            )
+        self._merge_lookup = {pair: idx for idx, pair in enumerate(self.merges)}
+
+    def encode(self, text):
+        out = []
+        words = text.split()
+        for wi, word in enumerate(words):
+            seq = list(word.encode("utf-8", errors="replace"))
+            changed = True
+            while changed:
+                changed = False
+                best_idx = None
+                best_pos = None
+                for i in range(len(seq) - 1):
+                    pair = (seq[i], seq[i + 1])
+                    idx = self._merge_lookup.get(pair)
+                    if idx is not None and (best_idx is None or idx < best_idx):
+                        best_idx = idx
+                        best_pos = i
+                if best_idx is not None and best_pos is not None:
+                    new_id = self.base + best_idx
+                    seq = seq[:best_pos] + [new_id] + seq[best_pos + 2:]
+                    changed = True
+            out.extend(seq)
+            if wi < len(words) - 1:
+                out.append(32)
+        return out
+
+    def decode(self, ids):
+        buf = bytearray()
+        for i in ids:
+            buf += self._id_to_bytes.get(i, b"")
+        return buf.decode("utf-8", errors="replace")
+
+    @property
+    def vocab_size(self):
+        return self.base + len(self.merges)
+
+    @classmethod
+    def from_state_dict(cls, d):
+        tok = cls(target_vocab=d.get("target_vocab", 1024))
+        tok.base = d.get("base", 256)
+        tok.merges = [tuple(m) for m in d.get("merges", [])]
+        tok._build_index()
+        return tok
+
+
+def _load_tokenizer(sd):
+    """Reconstruct the tokenizer recorded in a checkpoint (byte fallback)."""
+    tok_state = sd.get("tokenizer")
+    if tok_state and tok_state.get("type") == "bpe":
+        return BPETokenizer.from_state_dict(tok_state)
+    return ByteTokenizer()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -342,7 +417,7 @@ def main(argv=None):
           f"ctx={expected['ctx']} layers={expected['layers']} ff={expected['ff']}")
 
     # --- generation -------------------------------------------------------
-    tok = ByteTokenizer()
+    tok = _load_tokenizer(sd)
     prompt_ids = tok.encode(args.prompt)
     out_ids = model.generate(prompt_ids, max_new=args.max_new, temperature=args.temperature)
     text = tok.decode(out_ids)
