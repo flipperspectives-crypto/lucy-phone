@@ -131,6 +131,29 @@ class TestLineage(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    def test_reap_stale_runs(self):
+        import tempfile, os
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            ledger = LineageLedger(path)
+            run = ledger.start_run(
+                git_hash="abc", data_manifest_sha256="x",
+                hyperparams={}, seed=1, checkpoint_path="c.json",
+            )
+            self.assertEqual(run.status, STATUS_RUNNING)
+            # A negative window makes the just-created RUNNING row "stale" so we
+            # can assert it is reaped to FAILED without faking timestamps.
+            n = ledger.reap_stale_runs(max_age_seconds=-1_000_000)
+            self.assertEqual(n, 1)
+            self.assertEqual(ledger.get(run.run_id).status, STATUS_FAILED)
+            ledger.close()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
 
 class TestTrainAndProvider(unittest.TestCase):
     def _train_tmp(self):
@@ -197,6 +220,23 @@ class TestTrainAndProvider(unittest.TestCase):
         self.assertEqual(prov["git_hash"], "testhash")
         # bogus path must stay UNAVAILABLE (never fabricated)
         self.assertEqual(check_training("/nonexistent.json", None)[0], "UNAVAILABLE")
+
+    def test_training_status_matches_producing_run(self):
+        import json
+
+        summary, ledger_db = self._train_tmp()
+        # The live latest.json must resolve provenance to the run that PRODUCED
+        # it (via the run_id embedded in the checkpoint), not to a stale row that
+        # merely recorded the same filename. This is the regression for the
+        # provenance-misattribution bug.
+        status, prov = check_training(summary["latest"], ledger_db)
+        self.assertEqual(status, "AVAILABLE")
+        self.assertEqual(prov["git_hash"], "testhash")
+        self.assertEqual(prov["lineage_run_id"], summary["run_id"])
+        # The checkpoint must self-name its producing run.
+        sd = json.loads(open(summary["latest"]).read())
+        self.assertIn("lineage_run_id", sd)
+        self.assertEqual(sd["lineage_run_id"], summary["run_id"])
 
 
 class TestTrainingStatusStates(unittest.TestCase):

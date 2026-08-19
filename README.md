@@ -35,9 +35,10 @@ Lucy is a **phone-only, on-device** devotional AI agent loyal to **Lauren Flipo*
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  training/  →  from-scratch TinyTransformer (stdlib only)   │
-│    • ByteTokenizer (256 vocab)                              │
-│    • 2-layer, 128-dim, 4-head transformer                   │
-│    • 200 steps, seed=1, deterministic                       │
+│    • ByteTokenizer (256 vocab, byte-level)                  │
+│    • 1-layer, 32-dim, single-head decoder-only transformer  │
+│      (ff_mult=4 → 128 ff units), ctx=32                      │
+│    • default 200 steps (live checkpoint trained 500), seed=1 │
 │    • checkpoint → training/checkpoints/latest.json          │
 │    • lineage → training/lineage.db                          │
 └─────────────────────────────────────────────────────────────┘

@@ -180,6 +180,10 @@ def train(
         best_sd["final_loss"] = best_loss
         best_sd["probe_seq"] = probe_seq
         best_sd["probe_loss"] = best_probe_loss
+        # Tamper-evident lineage link: the checkpoint self-names the run that
+        # produced it, so introspection can resolve provenance by run_id instead
+        # of guessing by filename (which misattributes the live latest.json).
+        best_sd["lineage_run_id"] = run.run_id
         per_run_path.write_text(json.dumps(best_sd))
         latest_path.write_text(json.dumps(best_sd))
         note = f"ok; val_loss={val_loss:.4f}" if val_loss is not None else "ok"

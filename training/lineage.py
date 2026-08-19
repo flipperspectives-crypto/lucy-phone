@@ -99,6 +99,25 @@ class LineageLedger:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.execute(_SCHEMA)
         self.conn.commit()
+        # Recover from crashed runs: any RUNNING row older than the threshold was
+        # left by an interrupted process and must not linger as a phantom run.
+        self.reap_stale_runs()
+
+    def reap_stale_runs(self, max_age_seconds: int = 3600, note: str = "interrupted (no finish record)") -> int:
+        """Mark crashed RUNNING rows as FAILED.
+
+        A row left in RUNNING means a training process died before calling
+        ``finish_run``. We only reap rows older than ``max_age_seconds`` so a
+        legitimately in-flight run in another process is never touched.
+        Returns the number of rows reaped.
+        """
+        cutoff = time.time() - max_age_seconds
+        cur = self.conn.execute(
+            "UPDATE training_runs SET status=?, note=? WHERE status=? AND started_at < ?",
+            (STATUS_FAILED, note, STATUS_RUNNING, cutoff),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def start_run(
         self,

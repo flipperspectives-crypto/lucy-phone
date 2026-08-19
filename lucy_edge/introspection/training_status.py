@@ -60,12 +60,28 @@ def check_training(
         if db.exists():
             try:
                 conn = sqlite3.connect(str(db))
-                cur = conn.execute(
-                    "SELECT run_id, git_hash, data_manifest_sha256, status, final_loss "
-                    "FROM training_runs WHERE checkpoint_path=? ORDER BY started_at DESC LIMIT 1",
-                    (str(p),),
-                )
-                row = cur.fetchone()
+                row = None
+                # Prefer the run_id embedded in the checkpoint: it names the exact
+                # run that produced these weights, so provenance can never be
+                # misattributed to a stale/older run (the old path-based lookup
+                # matched whatever row happened to record this filename).
+                run_id = sd.get("lineage_run_id")
+                if run_id:
+                    cur = conn.execute(
+                        "SELECT run_id, git_hash, data_manifest_sha256, status, final_loss "
+                        "FROM training_runs WHERE run_id=?",
+                        (run_id,),
+                    )
+                    row = cur.fetchone()
+                if row is None:
+                    # Legacy checkpoints carry no run_id; fall back to the best
+                    # path-based match.
+                    cur = conn.execute(
+                        "SELECT run_id, git_hash, data_manifest_sha256, status, final_loss "
+                        "FROM training_runs WHERE checkpoint_path=? ORDER BY started_at DESC LIMIT 1",
+                        (str(p),),
+                    )
+                    row = cur.fetchone()
                 conn.close()
                 if row and row[3] == "DONE":
                     provenance["lineage_run_id"] = row[0]
