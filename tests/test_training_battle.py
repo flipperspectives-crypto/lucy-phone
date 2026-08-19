@@ -27,7 +27,7 @@ import asyncio
 from training.corpus import curate, ALLOWED_SOURCES, LICENSE_OWNED
 from training.tokenizer import ByteTokenizer, BPETokenizer
 from training.tiny_transformer import TinyTransformer
-from training.lineage import LineageLedger, STATUS_DONE, STATUS_FAILED
+from training.lineage import LineageLedger, STATUS_DONE, STATUS_FAILED, STATUS_RUNNING
 from training.train import train
 from training.provider import LocalLucyProvider
 from lucy_edge.introspection.training_status import check_training
@@ -324,6 +324,87 @@ class TestIntrospectionAdversarial(unittest.TestCase):
             self.assertEqual(check_training(str(d), None)[0], "UNAVAILABLE")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_reap_stale_sets_note(self):
+        import tempfile, os
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            ledger = LineageLedger(path)
+            run = ledger.start_run(
+                git_hash="abc", data_manifest_sha256="x",
+                hyperparams={}, seed=1, checkpoint_path="c.json",
+            )
+            # Negative window forces the just-created RUNNING row to be stale so
+            # we can assert the audit note is recorded (not just the status flip).
+            ledger.reap_stale_runs(max_age_seconds=-1_000_000)
+            got = ledger.get(run.run_id)
+            self.assertEqual(got.status, STATUS_FAILED)
+            self.assertEqual(got.note, "interrupted (no finish record)")
+            # A custom note must be honored verbatim.
+            run2 = ledger.start_run(
+                git_hash="def", data_manifest_sha256="y",
+                hyperparams={}, seed=2, checkpoint_path="c2.json",
+            )
+            ledger.reap_stale_runs(max_age_seconds=-1_000_000, note="killed by watchdog")
+            self.assertEqual(ledger.get(run2.run_id).note, "killed by watchdog")
+            ledger.close()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_fresh_running_not_reaped(self):
+        import tempfile, os
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            ledger = LineageLedger(path)
+            run = ledger.start_run(
+                git_hash="abc", data_manifest_sha256="x",
+                hyperparams={}, seed=1, checkpoint_path="c.json",
+            )
+            # A genuinely in-flight run (within the 3600s window) must survive.
+            n = ledger.reap_stale_runs(max_age_seconds=3600)
+            self.assertEqual(n, 0)
+            self.assertEqual(ledger.get(run.run_id).status, STATUS_RUNNING)
+            ledger.close()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_constructor_auto_reaps_stale(self):
+        import tempfile, os, time
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            # Session 1: start a run, then simulate a crash by aging the row
+            # past the reap window and closing WITHOUT finishing it.
+            ledger = LineageLedger(path)
+            run = ledger.start_run(
+                git_hash="abc", data_manifest_sha256="x",
+                hyperparams={}, seed=1, checkpoint_path="c.json",
+            )
+            ledger.conn.execute(
+                "UPDATE training_runs SET started_at=? WHERE run_id=?",
+                (time.time() - 7200, run.run_id),
+            )
+            ledger.conn.commit()
+            ledger.close()
+            # Session 2: opening the ledger must auto-reap the stale RUNNING row.
+            ledger2 = LineageLedger(path)
+            got = ledger2.get(run.run_id)
+            self.assertEqual(got.status, STATUS_FAILED)
+            self.assertEqual(got.note, "interrupted (no finish record)")
+            ledger2.close()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 class TestIntegrityBoundary(unittest.TestCase):
