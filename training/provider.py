@@ -150,6 +150,11 @@ class LocalLucyProvider(BaseProvider):
     def _generate_tokens(self, prompt: str, max_new: int = 24, temperature: float = 0.0) -> list[int]:
         m = self._ensure_loaded()
         ids = self._tok.encode(prompt)
+        if not ids:
+            # Empty/whitespace-only prompt encodes to zero tokens; avoid building a
+            # zero-length window (which would crash the forward pass) and return
+            # nothing instead.
+            return []
         ctx_ids = ids[-m.ctx :] if len(ids) >= m.ctx else ids
         generated: list[int] = []
         import math as _math

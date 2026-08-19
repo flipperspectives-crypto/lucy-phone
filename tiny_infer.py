@@ -197,6 +197,10 @@ class TinyTransformer:
         return logits
 
     def generate(self, ids, max_new=24, temperature=0.0):
+        if not ids:
+            # Empty/whitespace-only prompt encodes to zero tokens; returning nothing
+            # avoids building a zero-length window that would crash the forward pass.
+            return []
         ctx_ids = ids[-self.ctx :] if len(ids) >= self.ctx else ids
         generated = []
         for _ in range(max_new):

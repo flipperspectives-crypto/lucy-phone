@@ -153,6 +153,12 @@ def train(
             targets = [b[1:] for b in batch]
             logits, cache = m.forward(batch_x)
             loss, dlogits = m.cross_entropy(logits, targets)
+            if not math.isfinite(loss):
+                # A non-finite loss (e.g. from an extreme LR or degenerate batch)
+                # would poison the weights via backprop. Skip the update so the
+                # saved checkpoint always carries finite weights; the previous
+                # finite state is retained and training continues from there.
+                continue
             losses.append(loss)
             if loss < best_loss:
                 best_loss = loss
