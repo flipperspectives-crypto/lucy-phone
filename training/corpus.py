@@ -91,6 +91,19 @@ def _read_repo_file(repo_root: Path, rel: str) -> Optional[str]:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _read_data_dir(repo_root: Path) -> list[tuple[str, str]]:
+    """Read all .txt files from training/data/ for devotional text expansion."""
+    data_dir = repo_root / "training" / "data"
+    if not data_dir.is_dir():
+        return []
+    results = []
+    for p in sorted(data_dir.glob("*.txt")):
+        content = p.read_text(encoding="utf-8", errors="replace")
+        rel = str(p.relative_to(repo_root))
+        results.append((rel, content))
+    return results
+
+
 def _synthesized_foundation_examples() -> str:
     """Constructed training prompts derived ONLY from the repo's own contracts.
 
@@ -151,6 +164,20 @@ def curate(repo_root: str | Path = ".") -> Corpus:
                 license=LICENSE_OWNED,
                 collected_at=now,
                 kind="SOURCE_TEXT",
+            )
+        )
+        parts.append(f"\n# SOURCE: {rel}\n{content}\n")
+
+    for rel, content in _read_data_dir(repo_root):
+        data = content.encode("utf-8", "replace")
+        manifest.append(
+            ProvenanceRecord(
+                source=rel,
+                sha256=hashlib.sha256(data).hexdigest(),
+                bytes=len(data),
+                license=LICENSE_OWNED,
+                collected_at=now,
+                kind="DEVOTIONAL_TEXT",
             )
         )
         parts.append(f"\n# SOURCE: {rel}\n{content}\n")

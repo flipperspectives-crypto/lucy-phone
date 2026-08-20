@@ -1,5 +1,6 @@
 # Runtime data (memory DBs, evidence, tokens) - never commit
 data/
+!training/data/
 *.token
 *.db-journal
 *.db-wal
