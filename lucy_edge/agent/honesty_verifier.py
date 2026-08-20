@@ -78,7 +78,7 @@ class HonestyVerifier:
         self._violation_count = 0
         self._flagged_claims: list[str] = []
 
-    def verify_result(self, step: PlanStep, result: StepResult) -> HonestyCheckResult:
+    async def verify_result(self, step: PlanStep, result: StepResult) -> HonestyCheckResult:
         """Verify a step result for honesty compliance.
 
         Checks:
@@ -105,7 +105,7 @@ class HonestyVerifier:
             return fabrication_check
 
         # Check 3: Citation integrity
-        citation_check = self._check_citations(step, result)
+        citation_check = await self._check_citations(step, result)
         if citation_check.decision != HonestyDecision.VERIFIED:
             return citation_check
 
@@ -214,7 +214,7 @@ class HonestyVerifier:
 
         return HonestyCheckResult(decision=HonestyDecision.VERIFIED, reason="Fabrication check passed")
 
-    def _check_citations(self, step: PlanStep, result: StepResult) -> HonestyCheckResult:
+    async def _check_citations(self, step: PlanStep, result: StepResult) -> HonestyCheckResult:
         """Check that citations in output resolve to real records."""
         if result.status != "OK":
             return HonestyCheckResult(decision=HonestyDecision.VERIFIED, reason="Failed steps don't need citation check")
@@ -223,7 +223,6 @@ class HonestyVerifier:
         if not output_text.strip():
             return HonestyCheckResult(decision=HonestyDecision.VERIFIED, reason="Empty output doesn't need citation check")
 
-        # Look for citation patterns like [memory:xxx] or (evidence:yyy)
         import re
         citation_pattern = r"\[(memory|evidence):([a-f0-9]{8,})\]"
         citations = re.findall(citation_pattern, output_text)
@@ -231,13 +230,57 @@ class HonestyVerifier:
         if not citations:
             return HonestyCheckResult(decision=HonestyDecision.VERIFIED, reason="No citations to verify")
 
-        # In a real implementation, we'd verify each citation against the store
-        # For now, we flag that citations exist and should be verified
+        fabricated: list[str] = []
+        verified: list[str] = []
+        unresolvable: list[str] = []
+
+        for namespace, citation_id in citations:
+            resolved = False
+
+            if namespace == "memory" and self.retrieval is not None:
+                try:
+                    record = await self.retrieval.store.get(citation_id)
+                    if record is not None:
+                        resolved = True
+                        verified.append(f"memory:{citation_id}")
+                except Exception:
+                    pass
+
+            elif namespace == "evidence" and self.evidence is not None:
+                try:
+                    record = await self.evidence.get(citation_id)
+                    if record is not None:
+                        resolved = True
+                        verified.append(f"evidence:{citation_id}")
+                except Exception:
+                    pass
+
+            if not resolved:
+                if (namespace == "memory" and self.retrieval is not None) or \
+                   (namespace == "evidence" and self.evidence is not None):
+                    fabricated.append(f"{namespace}:{citation_id}")
+                else:
+                    unresolvable.append(f"{namespace}:{citation_id}")
+
+        if fabricated:
+            return HonestyCheckResult(
+                decision=HonestyDecision.REJECT,
+                reason=f"{len(fabricated)} citation(s) reference non-existent records",
+                flagged_claims=fabricated,
+                violation_type="FABRICATED_CITATION",
+            )
+
+        if unresolvable:
+            return HonestyCheckResult(
+                decision=HonestyDecision.FLAG_UNVERIFIED,
+                reason=f"{len(unresolvable)} citation(s) could not be verified (store unavailable)",
+                flagged_claims=unresolvable,
+                violation_type="UNVERIFIED_CITATIONS",
+            )
+
         return HonestyCheckResult(
-            decision=HonestyDecision.FLAG_UNVERIFIED,
-            reason=f"Output contains {len(citations)} citation(s) that should be verified against source",
-            flagged_claims=[f"Citation: {src}:{id}" for src, id in citations],
-            violation_type="UNVERIFIED_CITATIONS",
+            decision=HonestyDecision.VERIFIED,
+            reason=f"All {len(verified)} citation(s) resolved to real records",
         )
 
     def _check_uncertainty_honesty(self, step: PlanStep, result: StepResult) -> HonestyCheckResult:

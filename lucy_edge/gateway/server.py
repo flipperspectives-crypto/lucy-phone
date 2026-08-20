@@ -1,6 +1,6 @@
 """NEXUS LUCY EDGE gateway HTTP server (aiohttp).
 
-Control plane only.  No model weights, no Ollama startup, no inference
+Control plane only.  No model weights, no model startup, no inference
 initiation beyond the routing gated provider call (mock in phone phase).
 """
 

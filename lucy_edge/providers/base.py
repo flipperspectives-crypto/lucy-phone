@@ -1,10 +1,10 @@
 """Model-provider abstraction.
 
 The provider interface is deliberately model-independent: Lucy is NOT
-hardwired to Ollama.  A capability is never fabricated: anything a concrete
-provider does not implement raises ``CapabilityUnavailable`` or returns an
-explicit unsupported state, and ``capabilities()`` reports exactly which
-capabilities exist.
+hardwired to any specific provider.  A capability is never fabricated: anything
+a concrete provider does not implement raises ``CapabilityUnavailable`` or
+returns an explicit unsupported state, and ``capabilities()`` reports exactly
+which capabilities exist.
 """
 
 from __future__ import annotations

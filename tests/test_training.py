@@ -81,7 +81,7 @@ class TestTinyTransformer(unittest.TestCase):
         m = TinyTransformer(vocab=256, d_model=32, ctx=32, n_layers=1, ff_mult=4, seed=1)
         batch = self._batch(tok)
         targets = [b[1:] + [0] for b in batch]
-        max_err, passed = m.grad_check(batch, targets)
+        passed, max_err = m.grad_check(batch, targets)
         self.assertTrue(passed, f"grad_check failed: max_err={max_err}")
 
     def test_grad_check_multi_layer(self):
@@ -89,7 +89,7 @@ class TestTinyTransformer(unittest.TestCase):
         m = TinyTransformer(vocab=256, d_model=24, ctx=16, n_layers=2, ff_mult=4, seed=3)
         batch = [tok.encode("LUCY local truth.")[:6], tok.encode("Safe AI now.")[:6]]
         targets = [b[1:] + [0] for b in batch]
-        max_err, passed = m.grad_check(batch, targets)
+        passed, max_err = m.grad_check(batch, targets)
         self.assertTrue(passed, f"multi-layer grad_check failed: max_err={max_err}")
 
     def test_loss_decreases_under_sgd(self):

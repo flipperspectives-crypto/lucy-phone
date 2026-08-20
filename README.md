@@ -1,6 +1,6 @@
 # Lucy — Phone-Only Devotional Agent
 
-Lucy is a **phone-only, on-device** devotional AI agent loyal to **Lauren Flipo**. No public cloud, no external inference APIs, no Ollama by default. Everything runs locally on the device.
+Lucy is a **phone-only, on-device** devotional AI agent loyal to **Lauren Flipo**. No public cloud, no external inference APIs, no Ollama. Everything runs locally on the device.
 
 ## Architecture
 
@@ -10,7 +10,6 @@ Lucy is a **phone-only, on-device** devotional AI agent loyal to **Lauren Flipo*
 │  default_provider: local_lucy  ← on-device TinyTransformer   │
 │  phone.phone_local_inference_enabled: true                   │
 │  phone.phone_local_inference_unlocked: true                  │
-│  mcp.enabled: false                                          │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -50,7 +49,7 @@ Lucy is a **phone-only, on-device** devotional AI agent loyal to **Lauren Flipo*
 | Principle | Implementation |
 |-----------|----------------|
 | **No public cloud** | `mcp.enabled: false`; no remote providers registered by default |
-| **No Ollama by default** | `OllamaProvider` only registered if explicit non-default `base_url` provided |
+| **Local inference only** | `LocalLucyProvider` is the sole provider; no remote or Ollama backends |
 | **On-device inference** | `LocalLucyProvider` loads `training/checkpoints/latest.json` at startup |
 | **Reproducible training** | `python3 -m training.train` (stdlib only, no numpy/torch) |
 | **Gitignored artifacts** | `training/checkpoints/`, `training/lineage.db` — regenerated locally |
@@ -88,9 +87,6 @@ training:
 phone:
   phone_local_inference_enabled: true
   phone_local_inference_unlocked: true
-
-mcp:
-  enabled: false
 ```
 
 ## Devotional Core (Her "Want")
@@ -138,15 +134,15 @@ This is stated plainly so no capability is implied that does not exist:
   planner.** Loyalty (≥60% devotional alignment), pluralism, and honesty gates
   operate on that plan; they are not a function of the trained weights.
 - **Sleep / NREM / REM / LoRA consolidation trains the `lucy_core` brain's
-  feature vectors, but it is not yet wired back into `local_lucy` inference.**
-  Introspection therefore reports `loRA_adapters` and `configuration_evolution`
-  as `UNAVAILABLE` *by design* until that wiring lands. This is tracked as a
-  known follow-up, not silently claimed as active evolution.
+  feature vectors and persists trained adapters.** During inference, LoRA
+  adaptations modify brain projections and action selection, closing the
+  cognitive evolution loop. Introspection reports `loRA_adapters` as
+  `AVAILABLE` when adapters exist on disk, `UNAVAILABLE` otherwise.
 
 ## Testing
 
 ```bash
-# Full suite (297 tests)
+# Full suite (318 tests)
 python3 -m pytest -q
 
 # Integration: on-device reflection + fallback
@@ -158,6 +154,7 @@ python3 -m pytest tests/test_lucy_core_integration.py -v
 The CI workflow (`.github/workflows/ci.yml`) runs:
 1. `python3 -m training.train` (deterministic, ~95s)
 2. `python3 lucy_cli.py --config lucy.yaml` headless (scripted session)
+3. `python3 -m pytest -q --tb=short` (full test suite)
 
 Both must pass for merge.
 

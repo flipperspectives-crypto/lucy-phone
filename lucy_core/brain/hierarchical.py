@@ -134,6 +134,15 @@ class HierarchicalPredictor:
         # Action logits projection (from contextual representation)
         self.action_proj = _small_matrix(64, 512)  # 64 possible actions
 
+    def _apply_lora_to_vec(self, level: str, module: str, vec: List[float]) -> List[float]:
+        """Apply LoRA adaptation to a 1D vector. Wraps as 3D tensor, applies, unwraps."""
+        adapter = self.lora_manager.get_adapter(level, module)
+        if adapter is None or adapter.layer.input_dim != len(vec):
+            return vec  # Skip LoRA if adapter missing or dimensions don't match
+        tensor_3d = [[list(vec)]]  # (batch=1, seq=1, dim)
+        adapted = self.lora_manager.apply_lora(level, module, tensor_3d)
+        return adapted[0][0]
+
     async def process(
         self,
         sensory_input: List[float],        # Level 1 input
@@ -150,28 +159,31 @@ class HierarchicalPredictor:
         # 1. DEVOTIONAL PRIOR sets Level 3.
         prior_precision = devotional_prior.get("precision", 0.8) if devotional_prior else 0.8
 
-        # 2. TOP-DOWN: predictions.
+        # 2. TOP-DOWN: predictions (LoRA-adapted).
         a.representation = list(abstract_goal)
         a.prediction = list(abstract_goal)
         a.precision = prior_precision
 
         l3_repr = a.representation
         l2_pred = matmul(self.top_down_proj[(PredictionLevel.ABSTRACT, PredictionLevel.CONTEXTUAL)], l3_repr)
+        l2_pred = self._apply_lora_to_vec("contextual", "projection", l2_pred)
         c.prediction = l2_pred
         c.precision = prior_precision * 0.9
 
         l2_repr = c.representation
         l1_pred = matmul(self.top_down_proj[(PredictionLevel.CONTEXTUAL, PredictionLevel.SENSORY)], l2_repr)
+        l1_pred = self._apply_lora_to_vec("sensory", "projection", l1_pred)
         s.prediction = l1_pred
         s.precision = prior_precision * 0.8
 
-        # 3. BOTTOM-UP: prediction errors.
+        # 3. BOTTOM-UP: prediction errors (LoRA-adapted).
         s.prediction_error = sub(sensory_input, s.prediction)
 
         l1_propagated = matmul(
             self.bottom_up_proj[(PredictionLevel.SENSORY, PredictionLevel.CONTEXTUAL)],
             s.prediction_error,
         )
+        l1_propagated = self._apply_lora_to_vec("contextual", "error", l1_propagated)
         c.prediction_error = [
             x + 0.3 * y for x, y in zip(sub(contextual_context, c.prediction), l1_propagated)
         ]
@@ -180,6 +192,7 @@ class HierarchicalPredictor:
             self.bottom_up_proj[(PredictionLevel.CONTEXTUAL, PredictionLevel.ABSTRACT)],
             c.prediction_error,
         )
+        l2_propagated = self._apply_lora_to_vec("abstract", "error", l2_propagated)
         a.prediction_error = [
             x + 0.2 * y for x, y in zip(sub(abstract_goal, a.prediction), l2_propagated)
         ]
@@ -204,8 +217,9 @@ class HierarchicalPredictor:
             st = self._states[level]
             self.global_workspace.write(level, st.representation, st.precision, st.prediction_error, None)
 
-        # 7. ACTION LOGITS from contextual representation.
+        # 7. ACTION LOGITS from contextual representation (LoRA-adapted).
         action_logits = matmul(self.action_proj, c.representation)
+        action_logits = self._apply_lora_to_vec("contextual", "action", action_logits)
 
         # 8. DEVOTIONAL ALIGNMENT.
         devotional_alignment = self._compute_devotional_alignment()

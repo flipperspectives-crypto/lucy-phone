@@ -3,3 +3,5 @@ aiosqlite==0.22.1
 pydantic==2.13.4
 PyYAML==6.0.3
 websockets==17.0.1
+mypy>=1.15.0
+pytest-cov>=6.0.0

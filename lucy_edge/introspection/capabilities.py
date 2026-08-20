@@ -7,6 +7,7 @@ only because the SQLite store is actually present and opened.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 from ..version import BUILD_PHASE, READINESS, __version__
@@ -124,7 +125,7 @@ class CapabilityIntrospection:
                     "training.train (pure python, from-scratch)" if tstatus == "AVAILABLE" else None
                 ),
                 "gradient_descent": tstatus,
-                "loRA_adapters": "UNAVAILABLE",
+                "loRA_adapters": self._lora_status(),
                 "provenance": tprov if tstatus == "AVAILABLE" else {},
                 "note": (
                     "locally trained TinyTransformer on a provenance-tagged corpus"
@@ -212,3 +213,10 @@ class CapabilityIntrospection:
 
     async def runtime_report(self) -> dict[str, Any]:
         return await self.capabilities_report()
+
+    def _lora_status(self) -> str:
+        """Honest LoRA adapter status: AVAILABLE only when adapters exist on disk."""
+        from lucy_core.sleep.orchestrator import DEFAULT_LORA_PATH
+        if DEFAULT_LORA_PATH.exists():
+            return "AVAILABLE"
+        return "UNAVAILABLE"

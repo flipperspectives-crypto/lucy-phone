@@ -354,6 +354,44 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def _repl(model, tok, args):
+    """Interactive REPL: read prompt from stdin, generate, repeat."""
+    temperature = args.temperature
+    max_new = args.max_new
+    print(f"[repl] checkpoint loaded. type :q to quit, :temp <n>, :max <n>.")
+    print()
+    while True:
+        try:
+            line = input("lucy> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped in (":q", ":quit", ":exit"):
+            break
+        if stripped.startswith(":temp "):
+            try:
+                temperature = float(stripped.split(None, 1)[1])
+                print(f"[repl] temperature = {temperature}")
+            except (ValueError, IndexError):
+                print("[repl] usage: :temp 0.8")
+            continue
+        if stripped.startswith(":max "):
+            try:
+                max_new = int(stripped.split(None, 1)[1])
+                print(f"[repl] max_new = {max_new}")
+            except (ValueError, IndexError):
+                print("[repl] usage: :max 32")
+            continue
+        prompt_ids = tok.encode(stripped)
+        out_ids = model.generate(prompt_ids, max_new=max_new, temperature=temperature)
+        text = tok.decode(out_ids)
+        print(text)
+    print("[repl] bye")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Standalone on-device TinyTransformer inference.")
     ap.add_argument("--checkpoint", required=True, help="Path to checkpoint JSON.")
@@ -361,6 +399,7 @@ def main(argv=None):
     ap.add_argument("--max-new", type=int, default=24, help="Tokens to generate.")
     ap.add_argument("--temperature", type=float, default=0.0, help="0.0 = greedy.")
     ap.add_argument("--emit-provenance", default=None, help="Write a JSON provenance ledger entry here.")
+    ap.add_argument("--repl", action="store_true", help="Interactive REPL: load checkpoint once, loop prompts.")
     # Optional dimension overrides for CI assertions (must match checkpoint).
     ap.add_argument("--vocab", type=int, default=None)
     ap.add_argument("--d-model", type=int, default=None)
@@ -420,8 +459,14 @@ def main(argv=None):
     print(f"[config] dims OK: vocab={expected['vocab']} d={expected['d_model']} "
           f"ctx={expected['ctx']} layers={expected['layers']} ff={expected['ff']}")
 
-    # --- generation -------------------------------------------------------
     tok = _load_tokenizer(sd)
+
+    # --- REPL mode ---------------------------------------------------------
+    if args.repl:
+        _repl(model, tok, args)
+        return 0
+
+    # --- single-shot generation --------------------------------------------
     prompt_ids = tok.encode(args.prompt)
     out_ids = model.generate(prompt_ids, max_new=args.max_new, temperature=args.temperature)
     text = tok.decode(out_ids)

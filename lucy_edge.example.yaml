@@ -7,7 +7,7 @@ host_id: phn-nexus-01
 host_role: PHONE            # PHONE | LAPTOP | RTX4060 | SERVER | UNKNOWN
 
 phone:
-  phone_local_inference_enabled: true   # run her latest model via the phone's own Ollama
+  phone_local_inference_enabled: true   # run her latest model via on-device TinyTransformer
   # Behind the thermal/RAM gate (routing.policy.phone_local_gate): MICRO/SMALL
   # only, verified telemetry required. 7B-class is never local on the phone.
   local_inference_max_class: SMALL        # MICRO | SMALL
@@ -20,17 +20,18 @@ gateway:
   rate_window_seconds: 60.0
 
 providers:
-  default_provider: ollama   # ollama for real inference; mock for phone-safe tests
-  ollama_base_url: http://127.0.0.1:11434   # NEXUS_OLLAMA_HOST override; the phone's Ollama when local
+  default_provider: local_lucy
+  local_lucy:
+    checkpoint_path: training/checkpoints/latest.json
+    simulated: false
+
+training:
+  checkpoint_path: training/checkpoints/latest.json
+  lineage_db: training/lineage.db
 
 routing:
-  default_model: lucy:latest   # her latest model served by the local Ollama
-  allow_mock_generation: true
-  # Operator-declared sizes for model families whose tag does not encode a size.
-  # Lucy is canonically 7B in this project; the phone build is a ~3.5G model, so
-  # declare it here to let her run on the phone (SMALL class, behind the gate).
-  known_sizes:
-    lucy: 3.5
+  default_model: lucy-local
+  allow_mock_generation: false
 
 memory:
   db_path: data/memory.db
@@ -46,14 +47,6 @@ agent:
   task_timeout: 30.0
   tool_timeout: 10.0
   max_output_chars: 10000
-
-# A configured remote host is UNKNOWN until it registers itself.
-# remote_hosts:
-#   - host_id: desk-top-o99r0sf
-#     hostname: DESKTOP-O99R0SF
-#     role: LAPTOP
-#     provider: ollama
-#     base_url: http://127.0.0.1:11434
 
 phone_client:
   gateway_host: 127.0.0.1

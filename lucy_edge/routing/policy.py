@@ -200,7 +200,7 @@ class RoutingPolicy:
         The ARM guard only applies to phone-LOCAL inference (the phone running
         the model itself).  Routing to a remote host (target_host set) is NOT
         blocked by the ARM guard — that is the intended way to use a phone
-        with a remote Ollama on a laptop.
+        with a remote inference host on a laptop.
         """
         is_local_phone = request.host_role == HostRole.PHONE
         if not is_local_phone:

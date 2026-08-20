@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          # No external deps required (stdlib only)
+          pip install -r requirements.txt
 
       - name: Train on-device model
         run: |
@@ -46,7 +46,12 @@ jobs:
           printf 'good morning\nrun check system health\nstate\ntrust\ngoodnight\nexit\n' | python3 lucy_cli.py --config lucy.yaml
         timeout-minutes: 3
 
-      - name: Run test suite
+      - name: Type check
         run: |
-          python3 -m pytest -q --tb=short
+          python3 -m mypy lucy_core/ lucy_edge/ training/ --ignore-missing-imports
+        timeout-minutes: 3
+
+      - name: Run test suite with coverage
+        run: |
+          python3 -m pytest -q --tb=short --cov=lucy_core --cov=lucy_edge --cov=training --cov-report=term-missing
         timeout-minutes: 5

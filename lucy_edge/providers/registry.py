@@ -74,8 +74,8 @@ def build_default_registry(
     checkpoint is available and mock generation is disabled, the registry is
     empty and any inference request fails closed.
 
-    Remote / Ollama inference is out of scope: there is no public cloud and no
-    remote LLM.  ``OllamaProvider`` is not registered here.
+    Remote inference is out of scope: there is no public cloud and no
+    remote LLM.  Only local_lucy and opt-in mock providers are registered.
     """
     registry = ProviderRegistry()
 

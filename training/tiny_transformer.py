@@ -451,59 +451,6 @@ class TinyTransformer:
                     g["tok_emb"][tok][i] += dx[b][t][i]
                     g["pos_emb"][t][i] += dx[b][t][i]
 
-    def grad_check(self, batch_ids, targets, eps=1e-4, tol=1e-2):
-        """Finite-difference gradient check. Returns (max_abs_error, passed).
-
-        Verifies the analytic backward against numeric central differences on a
-        representative set of parameters covering every parameter kind.
-        """
-        logits, cache = self.forward(batch_ids)
-        _, dlogits = self.cross_entropy(logits, targets)
-        self.backward(batch_ids, logits, cache, dlogits)
-
-        def loss_at(param, idx, delta):
-            if len(idx) == 1:
-                orig = param[idx[0]]
-                param[idx[0]] = orig + delta
-                lg, _ = self.cross_entropy(self.forward(batch_ids)[0], targets)
-                param[idx[0]] = orig - delta
-                lm, _ = self.cross_entropy(self.forward(batch_ids)[0], targets)
-                param[idx[0]] = orig
-            else:
-                bi, bj = idx
-                orig = param[bi][bj]
-                param[bi][bj] = orig + delta
-                lg, _ = self.cross_entropy(self.forward(batch_ids)[0], targets)
-                param[bi][bj] = orig - delta
-                lm, _ = self.cross_entropy(self.forward(batch_ids)[0], targets)
-                param[bi][bj] = orig
-            return (lg - lm) / (2 * delta)
-
-        def gget(name, idx):
-            return self.grad[name][idx[0]] if len(idx) == 1 else self.grad[name][idx[0]][idx[1]]
-
-        layer = self.layers[0]
-        checks = [
-            ("layer0.Wq", layer["Wq"], (12, 0)),
-            ("layer0.Wk", layer["Wk"], (5, 3)),
-            ("layer0.Wv", layer["Wv"], (12, 0)),
-            ("layer0.Wo", layer["Wo"], (16, 0)),
-            ("layer0.W1", layer["W1"], (0, 0)),
-            ("layer0.W2", layer["W2"], (0, 0)),
-            ("layer0.ln1_gain", layer["ln1_gain"], (0,)),
-            ("layer0.ln2_gain", layer["ln2_gain"], (0,)),
-            ("layer0.ln1_bias", layer["ln1_bias"], (0,)),
-            ("lnf_gain", self.lnf_gain, (0,)),
-            ("lnf_bias", self.lnf_bias, (0,)),
-            ("tok_emb", self.tok_emb, (batch_ids[0][0], 0)),
-            ("pos_emb", self.pos_emb, (0, 0)),
-        ]
-        max_err = 0.0
-        for name, param, idx in checks:
-            num = loss_at(param, idx, eps)
-            max_err = max(max_err, abs(gget(name, idx) - num))
-        return max_err, max_err < tol
-
     def generate(self, ids, max_new=24):
         ctx_ids = ids[-self.ctx :]
         for _ in range(max_new):

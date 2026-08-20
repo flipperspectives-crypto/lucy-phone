@@ -10,8 +10,11 @@ without touching the frozen base weights.
 
 from __future__ import annotations
 
+import base64
+import json
 import pickle
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from lucy_core._linalg import (
@@ -93,8 +96,8 @@ class LoRAAdapter:
         return {
             "level": self.level,
             "module": self.module,
-            "A": pickle.dumps(self.layer.A),
-            "B": pickle.dumps(self.layer.B),
+            "A": base64.b64encode(pickle.dumps(self.layer.A)).decode("ascii"),
+            "B": base64.b64encode(pickle.dumps(self.layer.B)).decode("ascii"),
             "rank": self.layer.rank,
             "alpha": self.layer.alpha,
             "input_dim": self.layer.input_dim,
@@ -104,8 +107,8 @@ class LoRAAdapter:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "LoRAAdapter":
         layer = LoRALayer(d["input_dim"], d["output_dim"], d["rank"], d["alpha"])
-        layer.A = pickle.loads(d["A"])
-        layer.B = pickle.loads(d["B"])
+        layer.A = pickle.loads(base64.b64decode(d["A"]))
+        layer.B = pickle.loads(base64.b64decode(d["B"]))
         return cls(d["level"], d["module"], layer)
 
 
@@ -192,6 +195,69 @@ class LoRAAdapterManager:
         for i in range(len(B)):
             for j in range(len(B[0])):
                 B[i][j] -= lr * clip(grad_B[i][j], -1.0, 1.0)
+
+    # -- inspection -----------------------------------------------------------
+
+    def has_trained_weights(self) -> bool:
+        """Return True if any adapter has non-zero B weights (i.e. has been trained)."""
+        for adapter in self.adapters.values():
+            for row in adapter.layer.B:
+                for v in row:
+                    if v != 0.0:
+                        return True
+        return False
+
+    # -- persistence -----------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize all adapters to a JSON-compatible dict."""
+        return {
+            "config": {
+                "rank": self.config.rank,
+                "alpha": self.config.alpha,
+                "learning_rate": self.config.learning_rate,
+                "input_dim": self.config.input_dim,
+                "output_dim": self.config.output_dim,
+            },
+            "level_dims": self.level_dims,
+            "adapters": {
+                f"{level}:{module}": adapter.to_dict()
+                for (level, module), adapter in self.adapters.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "LoRAAdapterManager":
+        """Deserialize from a dict produced by ``to_dict``."""
+        cfg = d.get("config", {})
+        config = LoRAConfig(
+            rank=cfg.get("rank", 8),
+            alpha=cfg.get("alpha", 1.0),
+            learning_rate=cfg.get("learning_rate", 0.01),
+            input_dim=cfg.get("input_dim", 768),
+            output_dim=cfg.get("output_dim", 768),
+        )
+        level_dims = d.get("level_dims", {})
+        mgr = cls(level_dims=level_dims, config=config)
+        # Replace identity adapters with saved weights
+        for key_str, adapter_dict in d.get("adapters", {}).items():
+            adapter = LoRAAdapter.from_dict(adapter_dict)
+            mgr.adapters[(adapter.level, adapter.module)] = adapter
+        return mgr
+
+    def save(self, path: str | Path) -> None:
+        """Persist all adapters to a JSON file."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.to_dict()))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "LoRAAdapterManager":
+        """Load adapters from a JSON file produced by ``save``."""
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"LoRA adapter file not found: {p}")
+        return cls.from_dict(json.loads(p.read_text()))
 
     def _find_adapter(self, level: str) -> Optional[LoRAAdapter]:
         """Find any adapter registered for ``level`` (module-name agnostic)."""

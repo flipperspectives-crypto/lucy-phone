@@ -21,7 +21,7 @@ class LucyIntrospection:
         return {
             "service": "lucy_edge",
             "introspection_version": __version__,
-            "generated_from": "live runtime evidence (mock/test mode during phone phase)",
+            "generated_from": "live runtime evidence",
             **caps,
         }
 
@@ -36,7 +36,7 @@ class LucyIntrospection:
             "retrieval_available": memory["retrieval_available"],
             "git_tool_available": "git.status" in tools["names"],
             "remote_inference_available": False,
-            "remote_host_offline": False,
+            "remote_host_offline": True,
             "phone_local_inference_blocked": (
                 caps["inference"]["phone_local_inference_enabled"] is False
             ),

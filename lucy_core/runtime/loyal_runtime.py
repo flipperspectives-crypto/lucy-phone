@@ -225,9 +225,21 @@ class LoyalAgentRuntime:
             return None
         # Use the hierarchical predictor's LoRA manager if available
         if hasattr(self.hierarchical_predictor, 'lora_manager'):
-            return self.hierarchical_predictor.lora_manager
-        # Otherwise create a new one
-        from lucy_core.brain.lora import LoRAConfig
+            lora_mgr = self.hierarchical_predictor.lora_manager
+            # Try loading saved adapters into the predictor's manager
+            from pathlib import Path
+            from lucy_core.sleep.orchestrator import DEFAULT_LORA_PATH
+            if DEFAULT_LORA_PATH.exists():
+                from lucy_core.brain.lora import LoRAAdapterManager
+                saved = LoRAAdapterManager.load(DEFAULT_LORA_PATH)
+                lora_mgr.adapters = saved.adapters
+            return lora_mgr
+        # Otherwise create a new one, loading saved adapters if available
+        from pathlib import Path
+        from lucy_core.brain.lora import LoRAConfig, LoRAAdapterManager
+        from lucy_core.sleep.orchestrator import DEFAULT_LORA_PATH
+        if DEFAULT_LORA_PATH.exists():
+            return LoRAAdapterManager.load(DEFAULT_LORA_PATH)
         lora_config = LoRAConfig(rank=8)
         return LoRAAdapterManager(
             level_dims={
@@ -254,11 +266,27 @@ class LoyalAgentRuntime:
         return self._hash_to_vec(text, 256)
 
     def _build_contextual_context(self) -> List[float]:
-        """Build contextual context from memory retrieval."""
-        # If we have memory retrieval, use it; otherwise zeros
-        if self.memory_retrieval:
-            # In real impl: query memory for relevant context
-            pass
+        """Build contextual context from hippocampal memory retrieval."""
+        if self.hippocampal_indexer is None:
+            return [0.0] * 512
+
+        query = self._build_sensory_input()
+        hits = self.hippocampal_indexer.retrieve(query, k=5, threshold=0.5)
+        if not hits:
+            return [0.0] * 512
+
+        weighted = [0.0] * 512
+        total_score = 0.0
+        for mem_id, score in hits:
+            record = self.hippocampal_indexer.get_memory(mem_id)
+            if record is None:
+                continue
+            total_score += score
+            for i, v in enumerate(record.contextual_features[:512]):
+                weighted[i] += score * v
+
+        if total_score > 0:
+            return [v / total_score for v in weighted]
         return [0.0] * 512
 
     def _build_abstract_goal(self) -> List[float]:
@@ -449,7 +477,7 @@ class LoyalAgentRuntime:
             
             # 6. HONESTY VERIFICATION
             self.transition(AgentState.VERIFYING)
-            honesty_check = self.honesty_verifier.verify_result(step, step_result)
+            honesty_check = await self.honesty_verifier.verify_result(step, step_result)
             self._verifications.append({
                 "step": step.index,
                 "honesty": honesty_check.__dict__,

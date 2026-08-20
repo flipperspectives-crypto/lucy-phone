@@ -2,7 +2,7 @@
 
 Loads a checkpoint produced by ``training.train`` and runs inference with the
 pure-Python TinyTransformer. Implements the lucy_edge provider interface so it
-can be registered alongside mock/ollama without faking any capability.
+can be registered alongside mock without faking any capability.
 """
 
 from __future__ import annotations

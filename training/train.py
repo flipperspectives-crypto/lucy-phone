@@ -225,7 +225,15 @@ def train(
 
 
 if __name__ == "__main__":
+    import argparse
     import subprocess
+
+    ap = argparse.ArgumentParser(description="Train Lucy's local model from scratch")
+    ap.add_argument("--steps", type=int, default=200, help="SGD training steps (default 200)")
+    ap.add_argument("--lr", type=float, default=0.05, help="learning rate")
+    ap.add_argument("--ctx", type=int, default=32, help="context length")
+    ap.add_argument("--seed", type=int, default=1, help="RNG seed")
+    args = ap.parse_args()
 
     try:
         ghash = subprocess.run(
@@ -233,5 +241,5 @@ if __name__ == "__main__":
         ).stdout.strip()
     except Exception:
         ghash = ""
-    summary = train(git_hash=ghash)
+    summary = train(steps=args.steps, lr=args.lr, ctx=args.ctx, seed=args.seed, git_hash=ghash)
     print(json.dumps(summary, indent=2))

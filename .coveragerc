@@ -1,0 +1,15 @@
+[run]
+source = lucy_core,lucy_edge,training
+omit =
+    tests/*
+    */__pycache__/*
+    training/tiny_infer.py
+
+[report]
+show_missing = true
+skip_covered = true
+fail_under = 0
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if __name__ == .__main__.:

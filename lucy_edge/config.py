@@ -75,7 +75,7 @@ class GatewayConfig(BaseModel):
 
 class ProviderConfig(BaseModel):
     # The sovereign runtime has exactly one inference provider: the locally
-    # trained TinyTransformer (``local_lucy``).  No cloud, no remote Ollama,
+    # trained TinyTransformer (``local_lucy``).  No cloud, no remote inference,
     # no fallback provider.  ``mock`` is never the default and is only ever
     # registered when ``routing.allow_mock_generation`` is explicitly enabled.
     default_provider: str = "local_lucy"

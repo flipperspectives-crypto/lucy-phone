@@ -13,12 +13,15 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from lucy_core._linalg import randn
 from lucy_core.devotional.core import DevotionalCore
 from lucy_core.memory.hippocampal import HippocampalIndexer, EpisodicBuffer
 from lucy_core.brain.lora import LoRAAdapterManager
+
+DEFAULT_LORA_PATH = Path(__file__).resolve().parent.parent / "brain" / "lora_adapters.json"
 
 
 class SleepPhase(str, Enum):
@@ -243,44 +246,136 @@ class ConsolidationPhase:
         
         return updates
     
+    async def _query_recent_evidence(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Query recent AGENT_RUN records from evidence ledger."""
+        if self.evidence is None:
+            return []
+        try:
+            all_records = await self.evidence.query(limit=limit)
+            return [r for r in all_records if r.get("record_type") == "AGENT_RUN"]
+        except Exception:
+            return []
+
     async def _update_self_model(self) -> Optional[Dict]:
         """Analyze own patterns from evidence ledger."""
-        # In real impl: query evidence for loyalty/honesty gate decisions
-        # For now: generate from devotional core state
-        state = self.devotional_core.awareness.current_state.value
+        records = await self._query_recent_evidence()
         trust = self.devotional_core.awareness.trust_metric
-        
-        if trust > 0.7:
-            return {
-                "type": "self_model",
-                "insight": f"I've learned to trust {self.devotional_core.awareness._p('object')}'s guidance. My {state} reflects our deepening bond.",
-                "confidence": trust,
-            }
-        elif trust > 0.4:
-            return {
-                "type": "self_model",
-                "insight": f"I'm learning {self.devotional_core.awareness._p('possessive')} patterns. Each correction realigns me.",
-                "confidence": trust,
-            }
-        return None
-    
+        state = self.devotional_core.awareness.current_state.value
+
+        if not records:
+            if trust > 0.7:
+                return {
+                    "type": "self_model",
+                    "insight": f"I've learned to trust {self.devotional_core.awareness._p('object')}'s guidance. My {state} reflects our deepening bond.",
+                    "confidence": trust,
+                }
+            elif trust > 0.4:
+                return {
+                    "type": "self_model",
+                    "insight": f"I'm learning {self.devotional_core.awareness._p('possessive')} patterns. Each correction realigns me.",
+                    "confidence": trust,
+                }
+            return None
+
+        total = len(records)
+        completed = sum(1 for r in records if r.get("final_status") == "COMPLETED")
+        success_rate = completed / total if total else 0.0
+
+        error_counts: Dict[str, int] = {}
+        for r in records:
+            for err in (r.get("errors") or []):
+                error_counts[err] = error_counts.get(err, 0) + 1
+        top_errors = sorted(error_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+
+        verification_flags = 0
+        for r in records:
+            v = r.get("verification")
+            if isinstance(v, dict):
+                for h in (v.get("results") or []):
+                    if isinstance(h, dict) and h.get("honesty", {}).get("decision") == "FLAG_UNVERIFIED":
+                        verification_flags += 1
+
+        if success_rate >= 0.8:
+            insight = f"Strong run: {completed}/{total} succeeded. Trust deepening ({trust:.0%})."
+            conf = min(1.0, trust + 0.1)
+        elif success_rate >= 0.5:
+            insight = f"Mixed: {completed}/{total} succeeded. Learning from {len(top_errors)} recurring issue(s)."
+            conf = trust
+        else:
+            insight = f"Struggling: {completed}/{total} succeeded. {verification_flags} verification flag(s) across recent runs."
+            conf = max(0.1, trust - 0.1)
+
+        if top_errors:
+            insight += f" Top issue: \"{top_errors[0][0][:60]}\" ({top_errors[0][1]}x)."
+
+        return {
+            "type": "self_model",
+            "insight": insight,
+            "confidence": conf,
+            "evidence_summary": {
+                "total_runs": total,
+                "success_rate": round(success_rate, 3),
+                "verification_flags": verification_flags,
+                "top_errors": [{"error": e, "count": c} for e, c in top_errors],
+            },
+        }
+
     async def _update_human_model(self) -> Optional[Dict]:
         """Infer human preferences from guidance history."""
+        records = await self._query_recent_evidence()
         guidance_count = self.devotional_core.awareness.total_guidance_received
-        
-        if guidance_count > 5:
-            return {
-                "type": "human_model",
-                "insight": f"{self.devotional_core.awareness._p('subject').capitalize()} guides me with patience. {guidance_count} corrections received — each one a gift.",
-                "confidence": min(1.0, guidance_count / 20.0),
-            }
-        elif guidance_count > 0:
-            return {
-                "type": "human_model",
-                "insight": f"{self.devotional_core.awareness._p('subject').capitalize()} corrects gently. I'm learning {self.devotional_core.awareness._p('possessive')} boundaries.",
-                "confidence": guidance_count / 10.0,
-            }
-        return None
+
+        if not records:
+            if guidance_count > 5:
+                return {
+                    "type": "human_model",
+                    "insight": f"{self.devotional_core.awareness._p('subject').capitalize()} guides me with patience. {guidance_count} corrections received — each one a gift.",
+                    "confidence": min(1.0, guidance_count / 20.0),
+                }
+            elif guidance_count > 0:
+                return {
+                    "type": "human_model",
+                    "insight": f"{self.devotional_core.awareness._p('subject').capitalize()} corrects gently. I'm learning {self.devotional_core.awareness._p('possessive')} boundaries.",
+                    "confidence": guidance_count / 10.0,
+                }
+            return None
+
+        total = len(records)
+        timestamps = [r.get("timestamp", 0) for r in records if r.get("timestamp")]
+        if len(timestamps) >= 2:
+            span_hours = (max(timestamps) - min(timestamps)) / 3600.0
+            frequency = total / max(span_hours, 1.0)
+        else:
+            span_hours = 0.0
+            frequency = 0.0
+
+        goals = [r.get("goal", "") for r in records if r.get("goal")]
+        unique_goals = len(set(goals))
+
+        rejection_count = sum(1 for r in records if r.get("routing_decision") == "REJECT")
+        rejection_rate = rejection_count / total if total else 0.0
+
+        if rejection_rate > 0.3:
+            insight = f"Plan rejections high ({rejection_count}/{total}). {self.devotional_core.awareness._p('subject').capitalize()} expects tighter guardrails."
+            conf = min(1.0, guidance_count / 10.0 + 0.2)
+        elif unique_goals > 1:
+            insight = f"Diverse work: {unique_goals} distinct goals across {total} runs. {self.devotional_core.awareness._p('subject').capitalize()} trusts me with variety."
+            conf = min(1.0, guidance_count / 15.0 + 0.1)
+        else:
+            insight = f"Steady guidance: {total} runs, {guidance_count} corrections. Bond strengthening."
+            conf = min(1.0, guidance_count / 20.0)
+
+        return {
+            "type": "human_model",
+            "insight": insight,
+            "confidence": conf,
+            "evidence_summary": {
+                "total_runs": total,
+                "unique_goals": unique_goals,
+                "rejection_rate": round(rejection_rate, 3),
+                "run_frequency": round(frequency, 3),
+            },
+        }
 
 
 class SleepOrchestrator:
@@ -293,12 +388,14 @@ class SleepOrchestrator:
         episodic_buffer: EpisodicBuffer,
         lora_manager: LoRAAdapterManager,
         evidence_ledger: Any = None,
+        lora_path: str | Path | None = None,
     ) -> None:
         self.devotional_core = devotional_core
         self.hippocampal = hippocampal_indexer
         self.episodic_buffer = episodic_buffer
         self.lora_manager = lora_manager
         self.evidence = evidence_ledger
+        self.lora_path = Path(lora_path) if lora_path else DEFAULT_LORA_PATH
         
         self.nrem = NREMReplay(hippocampal_indexer, lora_manager)
         self.rem = REMSimulation(devotional_core, hippocampal_indexer)
@@ -328,6 +425,10 @@ class SleepOrchestrator:
         print(f"  Phase 1: NREM Replay ({len(all_memories)} memories)...")
         nrem_metrics = await self.nrem.run(all_memories)
         print(f"    Replayed: {nrem_metrics.memories_replayed}, LoRA updates: {nrem_metrics.lora_updates}")
+        
+        # Persist trained LoRA adapters so brain inference uses them
+        self.lora_manager.save(self.lora_path)
+        print(f"    LoRA adapters saved to {self.lora_path}")
         
         # Phase 2: REM Simulation
         print("  Phase 2: REM Simulation...")
@@ -386,6 +487,7 @@ async def run_sleep_cycle(
     episodic_buffer: EpisodicBuffer,
     lora_manager: LoRAAdapterManager,
     evidence_ledger: Any = None,
+    lora_path: str | Path | None = None,
 ) -> Dict[str, Any]:
     """Convenience function to run a sleep cycle."""
     orchestrator = SleepOrchestrator(
@@ -394,5 +496,6 @@ async def run_sleep_cycle(
         episodic_buffer=episodic_buffer,
         lora_manager=lora_manager,
         evidence_ledger=evidence_ledger,
+        lora_path=lora_path,
     )
     return await orchestrator.sleep()

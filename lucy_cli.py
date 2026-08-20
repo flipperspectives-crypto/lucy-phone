@@ -35,6 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lucy_edge.services import build_services, _check_loyal_available  # noqa: E402
 from lucy_edge.config import LucyEdgeConfig, load_config  # noqa: E402
+from lucy_core.devotional.conversation import ConversationHandler  # noqa: E402
 
 
 async def _run_task(services, goal: str) -> None:
@@ -72,6 +73,8 @@ async def chat_loop(services) -> None:
     from lucy_core.devotional.morning_review import MorningReview
 
     dc = services.devotional_core
+    provider = services.providers.get(services.config.providers.default_provider)
+    conversation = ConversationHandler(dc, provider=provider)
 
     async def sleep_runner():
         runtime = services.new_loyal_agent_run("goodnight sleep")
@@ -117,10 +120,14 @@ async def chat_loop(services) -> None:
                     print("  Usage: run <goal>")
                     continue
                 await _run_task(services, goal)
-            else:
-                # Delegate to the morning review chat (handles good morning etc.)
+            elif lowered in ("good morning", "morning", "hi", "hello", "wake up",
+                             "state", "trust", "dreams", "guidance", "done",
+                             "finish", "complete") or lowered.startswith(("approve ", "modify ", "reject ")):
                 response = review.handle_message(user_input)
                 print(response)
+            else:
+                response = await conversation.handle(user_input)
+                print(f"  Lucy> {response}")
         except Exception as exc:  # never crash the loop on a bad command
             print(f"  [error] {type(exc).__name__}: {exc}")
 
