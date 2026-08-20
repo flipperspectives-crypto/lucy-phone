@@ -65,8 +65,13 @@ def train(
     lineage_db: str | Path = "training/lineage.db",
     git_hash: Optional[str] = None,
     corpus_text: Optional[str] = None,
+    resume: bool = False,
 ) -> dict:
-    """Train a tiny model from scratch and persist a checkpoint + lineage entry.
+    """Train a tiny model and persist a checkpoint + lineage entry.
+
+    When *resume* is True, loads the existing ``latest.json`` checkpoint and
+    continues training from those weights and tokenizer state.  Otherwise a
+    fresh model is initialised from random weights.
 
     Returns a summary dict (also recorded in the lineage ledger).
     """
@@ -82,8 +87,16 @@ def train(
     # Learned, in-house BPE tokenizer (no external vocab, nothing fetched). Trained
     # solely on the corpus we are about to train on, so the vocabulary is fully
     # owned-local and reproducible from the checkpoint.
-    tok = BPETokenizer(target_vocab=512)
-    tok.train([text])
+    latest_path = Path(checkpoint_dir) / "latest.json"
+    prev_steps = 0
+    if resume and latest_path.exists():
+        sd = json.loads(latest_path.read_text())
+        tok = BPETokenizer.from_state_dict(sd["tokenizer"])
+        prev_steps = sd.get("trained_steps", 0)
+        print(f"  Resuming from step {prev_steps}, loss {sd.get('final_loss', '?')}")
+    else:
+        tok = BPETokenizer(target_vocab=512)
+        tok.train([text])
     token_ids = tok.encode(text)
     if not token_ids:
         raise RuntimeError("corpus is empty; nothing to train on")
@@ -136,9 +149,18 @@ def train(
             repo_root=repo_root,
         )
 
-        m = TinyTransformer(
-            vocab=tok.vocab_size, d_model=d_model, ctx=ctx, n_layers=n_layers, ff_mult=ff_mult, seed=seed
-        )
+        if resume and latest_path.exists():
+            sd = json.loads(latest_path.read_text())
+            m = TinyTransformer(
+                vocab=sd["vocab"], d_model=sd["d"], ctx=sd["ctx"],
+                n_layers=sd["L"], ff_mult=sd["ff"], seed=seed,
+            )
+            m.load_state_dict(sd)
+        else:
+            m = TinyTransformer(
+                vocab=tok.vocab_size, d_model=d_model, ctx=ctx,
+                n_layers=n_layers, ff_mult=ff_mult, seed=seed,
+            )
         rng = random.Random(seed)
         losses = []
         best_loss = float("inf")
@@ -186,7 +208,7 @@ def train(
         val_loss = _val_loss(m, val_seqs)
         # persist the BEST checkpoint (state_dict + training metadata), and a
         # per-run file whose path is recorded in the lineage ledger.
-        best_sd["trained_steps"] = steps
+        best_sd["trained_steps"] = prev_steps + steps
         best_sd["final_loss"] = best_loss
         best_sd["probe_seq"] = probe_seq
         best_sd["probe_loss"] = best_probe_loss
@@ -233,6 +255,7 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=0.05, help="learning rate")
     ap.add_argument("--ctx", type=int, default=32, help="context length")
     ap.add_argument("--seed", type=int, default=1, help="RNG seed")
+    ap.add_argument("--resume", action="store_true", help="resume from latest checkpoint")
     args = ap.parse_args()
 
     try:
@@ -241,5 +264,5 @@ if __name__ == "__main__":
         ).stdout.strip()
     except Exception:
         ghash = ""
-    summary = train(steps=args.steps, lr=args.lr, ctx=args.ctx, seed=args.seed, git_hash=ghash)
+    summary = train(steps=args.steps, lr=args.lr, ctx=args.ctx, seed=args.seed, git_hash=ghash, resume=args.resume)
     print(json.dumps(summary, indent=2))

@@ -486,6 +486,7 @@ class TinyTransformer:
         self.layers = sd["layers"]
         self.lnf_gain = sd["lnf_gain"]
         self.lnf_bias = sd["lnf_bias"]
+        self.params = {name: p for name, p in self._param_blocks()}
         self._init_grad()
 
     def grad_check(self, batch_ids, targets, eps=1e-4, tol=1e-2):
