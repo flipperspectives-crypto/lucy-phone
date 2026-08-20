@@ -98,6 +98,7 @@ class LocalLucyProvider(BaseProvider):
             Capability.HEALTH,
             Capability.LIST_MODELS,
             Capability.MODEL_METADATA,
+            Capability.CHAT,
             Capability.GENERATE,
         }
 
