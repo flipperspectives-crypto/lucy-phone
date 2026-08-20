@@ -11,7 +11,7 @@ import time
 from typing import Any, Optional
 
 from lucy_core.devotional.core import DevotionalCore, DevotionalState
-from lucy_edge.providers.base import BaseProvider, CapabilityUnavailable
+from lucy_edge.providers.base import BaseProvider, Capability, CapabilityUnavailable
 
 
 # Mapping from devotional state to a felt description for the system prompt.
