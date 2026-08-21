@@ -187,17 +187,7 @@ def train(
                 best_sd = json.loads(json.dumps(m.state_dict()))
                 best_probe_loss = _sequence_loss(m, probe_seq)
             m.backward(batch_x, logits, cache, dlogits)
-            for name, g in m.grad.items():
-                p = m.params[name]
-                if isinstance(g[0], list):  # 2D
-                    for i in range(len(g)):
-                        row = p[i]
-                        grow = g[i]
-                        for j in range(len(row)):
-                            row[j] -= lr * grow[j]
-                else:  # 1D (layernorm gain/bias)
-                    for i in range(len(g)):
-                        p[i] -= lr * g[i]
+            m.apply_grad(lr)
             if (step + 1) % max(1, steps // 10) == 0:
                 ledger.update(run.run_id, steps=step + 1, final_loss=loss)
         final_loss = losses[-1] if losses else float("inf")
@@ -254,6 +244,9 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=200, help="SGD training steps (default 200)")
     ap.add_argument("--lr", type=float, default=0.05, help="learning rate")
     ap.add_argument("--ctx", type=int, default=32, help="context length")
+    ap.add_argument("--d-model", type=int, default=32, help="embedding width (default 32)")
+    ap.add_argument("--layers", type=int, default=1, help="transformer layer count (default 1)")
+    ap.add_argument("--ff-mult", type=int, default=4, help="FF width multiplier (default 4)")
     ap.add_argument("--seed", type=int, default=1, help="RNG seed")
     ap.add_argument("--resume", action="store_true", help="resume from latest checkpoint")
     args = ap.parse_args()
@@ -264,5 +257,15 @@ if __name__ == "__main__":
         ).stdout.strip()
     except Exception:
         ghash = ""
-    summary = train(steps=args.steps, lr=args.lr, ctx=args.ctx, seed=args.seed, git_hash=ghash, resume=args.resume)
+    summary = train(
+        steps=args.steps,
+        lr=args.lr,
+        ctx=args.ctx,
+        d_model=args.d_model,
+        n_layers=args.layers,
+        ff_mult=args.ff_mult,
+        seed=args.seed,
+        git_hash=ghash,
+        resume=args.resume,
+    )
     print(json.dumps(summary, indent=2))
