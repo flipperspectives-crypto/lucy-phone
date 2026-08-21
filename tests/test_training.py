@@ -352,6 +352,57 @@ class TestTrainAndProvider(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestChatTemplating(unittest.TestCase):
+    """chat() must speak the corpus's USER:/LUCY: format, not raw prompts."""
+
+    def _prov(self):
+        return LocalLucyProvider(checkpoint_path="/nonexistent.json")
+
+    def test_build_chat_prompt_uses_last_user_turn(self):
+        p = self._prov()._build_chat_prompt([
+            {"role": "system", "content": "long prose system prompt that must be dropped"},
+            {"role": "user", "content": "What is trust to you?"},
+        ])
+        self.assertEqual(p, "USER: What is trust to you?\nLUCY:")
+
+    def test_build_chat_prompt_collapses_whitespace(self):
+        p = self._prov()._build_chat_prompt([{"role": "user", "content": "hi\n\nthere  friend"}])
+        self.assertEqual(p, "USER: hi there friend\nLUCY:")
+
+    def test_build_chat_prompt_without_user_message(self):
+        p = self._prov()._build_chat_prompt([{"role": "system", "content": "only system"}])
+        self.assertEqual(p, "USER: \nLUCY:")
+
+    def test_strip_at_turn_boundary(self):
+        from training.provider import strip_at_turn_boundary as s
+        self.assertEqual(s("an honest answer\nUSER: next"), "an honest answer")
+        self.assertEqual(s("an honest answer\n\nUSER: next"), "an honest answer")
+        self.assertEqual(s("an honest answer"), "an honest answer")
+        self.assertEqual(s("answer   \n\n"), "answer")
+        self.assertEqual(s(""), "")
+
+    def test_chat_integration_no_turn_bleed(self):
+        import asyncio
+        import shutil
+        import tempfile
+
+        from .helpers import trained_checkpoint
+
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            prov = LocalLucyProvider(checkpoint_path=cp)
+            res = asyncio.run(
+                prov.chat([{"role": "user", "content": "What is trust?"}], model="lucy-local")
+            )
+            self.assertFalse(res.simulated)
+            self.assertIsInstance(res.message, str)
+            # the response must never run into the next turn
+            self.assertNotIn("USER:", res.message)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestTrainingStatusStates(unittest.TestCase):
     def _write(self, tmp, trained):
         import json, os

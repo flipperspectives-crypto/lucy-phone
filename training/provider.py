@@ -25,6 +25,20 @@ from lucy_edge.providers.base import (
 from .tiny_transformer import TinyTransformer
 from .tokenizer import ByteTokenizer, BPETokenizer
 
+# Turn-boundary markers: the corpus is authored as "USER: ...\nLUCY: ...\n\n"
+# blocks, so a well-formed answer ends when the model starts the next turn.
+_TURN_MARKERS = ("\nUSER", "\n\n")
+
+
+def strip_at_turn_boundary(text: str) -> str:
+    """Cut generated text at the first next-turn marker and trim trailing space."""
+    cut = len(text)
+    for marker in _TURN_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut].rstrip()
+
 
 class LocalLucyProvider(BaseProvider):
     """Runs a locally trained TinyTransformer checkpoint.
@@ -148,29 +162,52 @@ class LocalLucyProvider(BaseProvider):
         return models[0]
 
     # --- inference ---------------------------------------------------------
-    def _generate_tokens(self, prompt: str, max_new: int = 24, temperature: float = 0.0) -> list[int]:
+    def _build_chat_prompt(self, messages: list[dict[str, Any]]) -> str:
+        """Format the last user turn in the corpus's USER:/LUCY: structure.
+
+        The verbose system prompt is deliberately dropped: with a 32-token
+        context window it would crowd out the actual question, and the model
+        was never trained on prose system prompts -- only on USER:/LUCY:
+        dialogue blocks.
+        """
+        user_text = ""
+        for m in reversed(messages):
+            if isinstance(m, dict) and m.get("role") == "user":
+                user_text = str(m.get("content", ""))
+                break
+        user_text = " ".join(user_text.split())  # collapse newlines/runs of space
+        return f"USER: {user_text}\nLUCY:"
+
+    def _generate_from_ids(
+        self,
+        ids: list[int],
+        max_new: int = 24,
+        temperature: float = 0.0,
+        stop_boundary: bool = False,
+    ) -> list[int]:
+        """Greedy/temperature decode from token ids.
+
+        With *stop_boundary*, generation halts as soon as the decoded text
+        crosses into the next USER turn (or a blank-line block break), so chat
+        responses end where the trained format says an answer ends.
+        """
         m = self._ensure_loaded()
-        ids = self._tok.encode(prompt)
         if not ids:
-            # Empty/whitespace-only prompt encodes to zero tokens; avoid building a
-            # zero-length window (which would crash the forward pass) and return
-            # nothing instead.
             return []
-        ctx_ids = ids[-m.ctx :] if len(ids) >= m.ctx else ids
-        generated: list[int] = []
         import math as _math
         import random as _random
 
+        ctx_ids = ids[-m.ctx :] if len(ids) >= m.ctx else ids
+        generated: list[int] = []
         for _ in range(max_new):
             window = ctx_ids[-m.ctx :]
             logits, _ = m.forward([window])
             last = logits[0][-1]
             if temperature and temperature > 0:
-                # softmax sampling
                 mx = max(last)
                 exps = [_math.exp((x - mx) / temperature) for x in last]
                 s = sum(exps)
-                r = _random.random()  # noqa: used only when temperature > 0
+                r = _random.random()
                 acc = 0.0
                 nxt = len(last) - 1
                 for i, e in enumerate(exps):
@@ -182,7 +219,15 @@ class LocalLucyProvider(BaseProvider):
                 nxt = max(range(len(last)), key=lambda v: last[v])
             generated.append(nxt)
             ctx_ids = ctx_ids + [nxt]
+            if stop_boundary:
+                text = self._tok.decode(generated)
+                if any(marker in text for marker in _TURN_MARKERS):
+                    break
         return generated
+
+    def _generate_tokens(self, prompt: str, max_new: int = 24, temperature: float = 0.0) -> list[int]:
+        ids = self._tok.encode(prompt)
+        return self._generate_from_ids(ids, max_new=max_new, temperature=temperature)
 
     async def generate(self, prompt: str, model: str, **options: Any) -> GenerationResult:
         max_new = int(options.get("max_new_tokens", options.get("max_new", 24)))
@@ -198,13 +243,28 @@ class LocalLucyProvider(BaseProvider):
         )
 
     async def chat(self, messages: list[dict[str, Any]], model: str, **options: Any) -> ChatResponse:
-        # flatten chat messages into a single prompt (no chat templating yet)
-        prompt = "\n".join(m.get("content", "") for m in messages if isinstance(m, dict))
-        res = await self.generate(prompt, model, **options)
+        """Conversational generation in the trained USER:/LUCY: format.
+
+        The prompt is left-truncated at the token level so the trailing
+        "LUCY:" turn marker always survives the context window, and the
+        response stops at the first next-turn boundary.
+        """
+        m = self._ensure_loaded()
+        max_new = int(options.get("max_new_tokens", options.get("max_new", 32)))
+        temperature = float(options.get("temperature", 0.0))
+        prompt = self._build_chat_prompt(messages)
+        ids = self._tok.encode(prompt)
+        cap = max(4, m.ctx - 8)  # keep room to generate inside the window
+        if len(ids) > cap:
+            ids = ids[-cap:]
+        gen_ids = self._generate_from_ids(
+            ids, max_new=max_new, temperature=temperature, stop_boundary=True
+        )
+        text = strip_at_turn_boundary(self._tok.decode(gen_ids))
         return ChatResponse(
             provider=self.name,
             model=self.model_name,
-            message=res.text,
+            message=text,
             simulated=False,
         )
 

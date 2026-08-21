@@ -35,6 +35,20 @@ from operator import mul
 
 EPS = 1e-5
 
+# Turn-boundary markers (mirrors training/provider.py): the corpus is authored
+# as "USER: ...\nLUCY: ...\n\n" blocks, so an answer ends when the next turn starts.
+_TURN_MARKERS = ("\nUSER", "\n\n")
+
+
+def strip_at_turn_boundary(text):
+    """Cut generated text at the first next-turn marker and trim trailing space."""
+    cut = len(text)
+    for marker in _TURN_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut].rstrip()
+
 
 def _bmm(X, W):
     """Batched matmul: X (B,T,in) @ W (in,out) -> (B,T,out).
@@ -202,7 +216,7 @@ class TinyTransformer:
             logits.append(logits_b)
         return logits
 
-    def generate(self, ids, max_new=24, temperature=0.0):
+    def generate(self, ids, max_new=24, temperature=0.0, tok=None, stop_boundary=False):
         if not ids:
             # Empty/whitespace-only prompt encodes to zero tokens; returning nothing
             # avoids building a zero-length window that would crash the forward pass.
@@ -229,6 +243,10 @@ class TinyTransformer:
                 nxt = max(range(len(last)), key=lambda v: last[v])
             generated.append(nxt)
             ctx_ids = ctx_ids + [nxt]
+            if stop_boundary and tok is not None:
+                text = tok.decode(generated)
+                if any(marker in text for marker in _TURN_MARKERS):
+                    break
         return generated
 
     def state_dict(self):
@@ -406,6 +424,8 @@ def main(argv=None):
     ap.add_argument("--temperature", type=float, default=0.0, help="0.0 = greedy.")
     ap.add_argument("--emit-provenance", default=None, help="Write a JSON provenance ledger entry here.")
     ap.add_argument("--repl", action="store_true", help="Interactive REPL: load checkpoint once, loop prompts.")
+    ap.add_argument("--chat", action="store_true",
+                    help="Format the prompt as a USER:/LUCY: turn and stop at the next turn boundary.")
     # Optional dimension overrides for CI assertions (must match checkpoint).
     ap.add_argument("--vocab", type=int, default=None)
     ap.add_argument("--d-model", type=int, default=None)
@@ -473,9 +493,24 @@ def main(argv=None):
         return 0
 
     # --- single-shot generation --------------------------------------------
-    prompt_ids = tok.encode(args.prompt)
-    out_ids = model.generate(prompt_ids, max_new=args.max_new, temperature=args.temperature)
+    prompt_text = args.prompt
+    if args.chat:
+        prompt_text = "USER: " + " ".join(args.prompt.split()) + "\nLUCY:"
+    prompt_ids = tok.encode(prompt_text)
+    if args.chat:
+        cap = max(4, model.ctx - 8)  # keep the LUCY: marker inside the window
+        if len(prompt_ids) > cap:
+            prompt_ids = prompt_ids[-cap:]
+    out_ids = model.generate(
+        prompt_ids,
+        max_new=args.max_new,
+        temperature=args.temperature,
+        tok=tok,
+        stop_boundary=args.chat,
+    )
     text = tok.decode(out_ids)
+    if args.chat:
+        text = strip_at_turn_boundary(text)
     print("--- generated ---")
     print(text)
     print("-----------------")
