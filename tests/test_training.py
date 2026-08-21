@@ -467,6 +467,94 @@ class TestTrainingStatusStates(unittest.TestCase):
             os.rmdir(tmp)
 
 
+class TestTrainStatusScript(unittest.TestCase):
+    """The ops script must report honest state and the exact resume command."""
+
+    def _import(self):
+        import os
+        import sys
+
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+        )
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import train_status  # noqa: E402
+
+        return train_status
+
+    def test_load_snapshot_missing_and_present(self):
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        ts = self._import()
+        self.assertIsNone(ts.load_snapshot("/nonexistent.json"))
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "latest.json")
+            with open(p, "w") as f:
+                json.dump({"trained_steps": 6250, "final_loss": 2.66, "d": 64}, f)
+            sd = ts.load_snapshot(p)
+            self.assertEqual(sd["trained_steps"], 6250)
+            # unreadable garbage is None, never a crash
+            bad = os.path.join(tmp, "bad.json")
+            with open(bad, "w") as f:
+                f.write("{not json")
+            self.assertIsNone(ts.load_snapshot(bad))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_resume_command_math(self):
+        ts = self._import()
+        self.assertEqual(
+            ts.resume_command(6250, 15000),
+            "python3 -m training.train --resume --steps 8750 --seed 1",
+        )
+        self.assertEqual(ts.resume_command(15000, 15000), "")
+        self.assertEqual(ts.resume_command(16000, 15000), "")
+
+    def test_render_status_running_vs_dead(self):
+        import time
+
+        ts = self._import()
+        sd = {"trained_steps": 3500, "final_loss": 2.94, "d": 64}
+        now = time.time()
+        running = ts.render_status(sd, 15000, 30933, now, now - 60)
+        self.assertIn("step 3500/15000", running)
+        self.assertIn("loss 2.9400", running)
+        self.assertIn("RUNNING (pid 30933)", running)
+        dead = ts.render_status(sd, 15000, None, now, now - 60 * 76)
+        self.assertIn("NOT RUNNING", dead)
+        self.assertIn("--resume --steps 11500", dead)
+
+    def test_main_exit_codes(self):
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        ts = self._import()
+        self.assertEqual(ts.main(["--checkpoint", "/nonexistent.json"], _pid=None), 2)
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "latest.json")
+            with open(p, "w") as f:
+                json.dump({"trained_steps": 6250, "final_loss": 2.66}, f)
+            # dead process, run unfinished -> needs attention
+            self.assertEqual(ts.main(["--checkpoint", p], _pid=None), 1)
+            # finished run with no live process -> success
+            done = os.path.join(tmp, "done.json")
+            with open(done, "w") as f:
+                json.dump({"trained_steps": 15000, "final_loss": 2.0}, f)
+            self.assertEqual(ts.main(["--checkpoint", done], _pid=None), 0)
+            # live pid -> running regardless of progress
+            self.assertEqual(ts.main(["--checkpoint", p], _pid=4242), 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestProviderSampling(unittest.TestCase):
     def test_temperature_sampling_works(self):
         import asyncio, os, shutil, tempfile
