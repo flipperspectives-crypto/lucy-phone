@@ -43,10 +43,20 @@ def _sequence_loss(m: "TinyTransformer", seq: list[int]) -> float:
     return loss
 
 
-def _val_loss(m: "TinyTransformer", val_seqs: list[list[int]], n: int = 8) -> Optional[float]:
+def _val_loss(m: "TinyTransformer", val_seqs: list[list[int]], n: int = 32) -> Optional[float]:
+    """Held-out loss over a deterministic, evenly spaced sample of *n* sequences.
+
+    Spreading the sample across the whole validation stream (instead of taking
+    the first n) removes the positional bias where one corpus section dominated
+    the score.
+    """
     if not val_seqs:
         return None
-    sample = val_seqs[:n]
+    if len(val_seqs) <= n:
+        sample = val_seqs
+    else:
+        stride = len(val_seqs) / n
+        sample = [val_seqs[int(i * stride)] for i in range(n)]
     return sum(_sequence_loss(m, s) for s in sample) / len(sample)
 
 

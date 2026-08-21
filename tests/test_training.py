@@ -403,6 +403,41 @@ class TestChatTemplating(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestEvalScript(unittest.TestCase):
+    """The eval script's held-out score must run against a real checkpoint."""
+
+    def test_quant_heldout_loss_runs(self):
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        from .helpers import trained_checkpoint
+
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+        )
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import eval_checkpoint  # noqa: E402
+
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            prov = LocalLucyProvider(checkpoint_path=cp)
+            sd = json.loads(open(cp).read())
+            q = eval_checkpoint.quant_heldout_loss(prov, sd)
+            self.assertIsNotNone(q)
+            self.assertGreater(q, 0.0)
+            # cached second call returns the same windows
+            seqs1 = list(eval_checkpoint.heldout_sequences(sd))
+            seqs2 = list(eval_checkpoint.heldout_sequences(sd))
+            self.assertEqual(seqs1, seqs2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestTrainingStatusStates(unittest.TestCase):
     def _write(self, tmp, trained):
         import json, os
