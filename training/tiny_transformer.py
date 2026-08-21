@@ -18,16 +18,17 @@ from __future__ import annotations
 
 import math
 import random
+from operator import mul
 
 EPS = 1e-5
 
 
 def _matmul(a, b):
-    m, n, p = len(a), len(a[0]), len(b[0])
-    return [
-        [sum(a[i][k] * b[k][j] for k in range(n)) for j in range(p)]
-        for i in range(m)
-    ]
+    # Transpose once, then dot products via C-level map(mul, ...). The
+    # multiply/add order over k is unchanged vs the naive triple loop, so
+    # results are bit-identical -- this is purely an interpreter-exit speedup.
+    cols = list(zip(*b))
+    return [[sum(map(mul, row, col)) for col in cols] for row in a]
 
 
 def _transpose(a):
@@ -50,34 +51,36 @@ def _copy(a):
 
 
 def _bmm(X, W):
-    """Batched matmul: X (B,T,in) @ W (in,out) -> (B,T,out)."""
-    B, T = len(X), len(X[0])
-    out = [[[0.0] * len(W[0]) for _ in range(T)] for _ in range(B)]
-    for b in range(B):
-        for t in range(T):
-            row = X[b][t]
-            for j in range(len(W[0])):
-                s = 0.0
-                for k in range(len(W)):
-                    s += row[k] * W[k][j]
-                out[b][t][j] = s
-    return out
+    """Batched matmul: X (B,T,in) @ W (in,out) -> (B,T,out).
+
+    Hot path: W is transposed once per call and every dot product runs through
+    C-level ``map(mul, ...)`` so the inner loop leaves the interpreter. The
+    multiply/add order over k is unchanged, so results are bit-identical to
+    the naive triple loop this replaces.
+    """
+    cols = list(zip(*W))
+    return [
+        [[sum(map(mul, xrow, col)) for col in cols] for xrow in batch]
+        for batch in X
+    ]
 
 
 def _outer_sum(X, Y):
-    """Sum over b,t of X[b][t] (in) outer Y[b][t] (out) -> (in,out)."""
+    """Sum over b,t of X[b][t] (in) outer Y[b][t] (out) -> (in,out).
+
+    Inner j loop is vectorized with zip at C level; the accumulation order
+    over b,t per element is unchanged, so results are bit-identical.
+    """
     B, T = len(X), len(X[0])
-    inn, out = len(X[0][0]), len(Y[0][0])
-    M = [[0.0] * out for _ in range(inn)]
+    inn = len(X[0][0])
+    M = [[0.0] * len(Y[0][0]) for _ in range(inn)]
     for b in range(B):
         for t in range(T):
             xb = X[b][t]
             yb = Y[b][t]
             for i in range(inn):
                 xi = xb[i]
-                Mi = M[i]
-                for j in range(out):
-                    Mi[j] += xi * yb[j]
+                M[i] = [m + xi * yj for m, yj in zip(M[i], yb)]
     return M
 
 
@@ -216,31 +219,42 @@ class TinyTransformer:
 
     def zero_grad(self):
         for name in self.grad:
-            self.grad[name] = _zeros_like(self.grad[name])
+            g = self.grad[name]
+            if _is_matrix(g):
+                for r, row in enumerate(g):
+                    g[r] = [0.0] * len(row)
+            else:
+                self.grad[name] = [0.0] * len(g)
 
     def apply_grad(self, lr):
-        """Shape-aware SGD step (handles both matrices and vectors)."""
+        """Shape-aware SGD step (handles both matrices and vectors).
+
+        Element updates are vectorized with zip at C level; the per-element
+        operation (p -= lr * g) and its order are unchanged, so results are
+        bit-identical to the scalar double loop.
+        """
         for name, p in self._param_blocks():
             g = self.grad[name]
             if _is_matrix(p):
                 for r in range(len(p)):
-                    for c in range(len(p[0])):
-                        p[r][c] -= lr * g[r][c]
+                    p[r] = [v - lr * gv for v, gv in zip(p[r], g[r])]
             else:
-                for i in range(len(p)):
-                    p[i] -= lr * g[i]
+                p[:] = [v - lr * gv for v, gv in zip(p, g)]
 
     def forward(self, batch_ids):
         B = len(batch_ids)
         T = len(batch_ids[0])
         d = self.d
 
-        e = [[[0.0] * d for _ in range(T)] for _ in range(B)]
+        e = []
         for b in range(B):
+            e_b = []
+            tok_row = self.tok_emb
+            pos_row = self.pos_emb
             for t in range(T):
                 tok = batch_ids[b][t]
-                for i in range(d):
-                    e[b][t][i] = self.tok_emb[tok][i] + self.pos_emb[t][i]
+                e_b.append([tv + pv for tv, pv in zip(tok_row[tok], pos_row[t])])
+            e.append(e_b)
 
         cache_layers = []
         x = e
@@ -253,20 +267,25 @@ class TinyTransformer:
             w = [[[0.0] * T for _ in range(T)] for _ in range(B)]
             for b in range(B):
                 for t in range(T):
+                    q_bt = q[b][t]
                     logits_t = [
-                        sum(q[b][t][i] * k[b][s][i] for i in range(d)) * scale
+                        sum(map(mul, q_bt, k[b][s])) * scale
                         for s in range(t + 1)
                     ]
                     w_bt = _softmax_row(logits_t)
-                    for s in range(t + 1):
-                        w[b][t][s] = w_bt[s]
-            a = [[[0.0] * d for _ in range(T)] for _ in range(B)]
+                    w[b][t] = w_bt
+            a = []
             for b in range(B):
+                a_b = []
                 for t in range(T):
+                    acc = [0.0] * d
+                    w_bt = w[b][t]
                     for s in range(t + 1):
-                        ws = w[b][t][s]
-                        for i in range(d):
-                            a[b][t][i] += ws * v[b][s][i]
+                        ws = w_bt[s]
+                        v_bs = v[b][s]
+                        acc = [ai + ws * vi for ai, vi in zip(acc, v_bs)]
+                    a_b.append(acc)
+                a.append(a_b)
             o = _bmm(a, layer["Wo"])
             x_attn = _add(x, o)
 
@@ -293,11 +312,13 @@ class TinyTransformer:
             )
 
         hf, lnf_cache = self._ln_forward(x, self.lnf_gain, self.lnf_bias)
-        logits = [[[0.0] * self.vocab for _ in range(T)] for _ in range(B)]
+        logits = []
         for b in range(B):
+            logits_b = []
             for t in range(T):
-                for v in range(self.vocab):
-                    logits[b][t][v] = sum(hf[b][t][i] * self.tok_emb[v][i] for i in range(d))
+                hf_bt = hf[b][t]
+                logits_b.append([sum(map(mul, hf_bt, emb_v)) for emb_v in self.tok_emb])
+            logits.append(logits_b)
         cache = {"hf": hf, "lnf_cache": lnf_cache, "layers": cache_layers}
         return logits, cache
 
@@ -329,22 +350,24 @@ class TinyTransformer:
     def cross_entropy(self, logits, targets):
         B, T = len(targets), len(targets[0])
         loss = 0.0
-        dlogits = [[[0.0] * self.vocab for _ in range(T)] for _ in range(B)]
+        dlogits = []
+        V = self.vocab
         for b in range(B):
+            dlogits_b = []
             for t in range(T):
                 row = logits[b][t]
                 m = max(row)
                 e = [math.exp(v - m) for v in row]
                 s = sum(e)
                 loss += -math.log(e[targets[b][t]] / s)
-                for v in range(self.vocab):
-                    dlogits[b][t][v] = e[v] / s
-                dlogits[b][t][targets[b][t]] -= 1.0
+                dr = [ev / s for ev in e]
+                dr[targets[b][t]] -= 1.0
+                dlogits_b.append(dr)
+            dlogits.append(dlogits_b)
         inv = 1.0 / (B * T)
         for b in range(B):
             for t in range(T):
-                for v in range(self.vocab):
-                    dlogits[b][t][v] *= inv
+                dlogits[b][t] = [dv * inv for dv in dlogits[b][t]]
         return loss * inv, dlogits
 
     def backward(self, batch_ids, logits, cache, dlogits):
@@ -354,9 +377,10 @@ class TinyTransformer:
 
         d_hf = _bmm(dlogits, self.tok_emb)
         d_tok_emb_acc = _outer_sum(cache["hf"], dlogits)
+        g_tok = g["tok_emb"]
         for v in range(V):
-            for i in range(d):
-                g["tok_emb"][v][i] += d_tok_emb_acc[i][v]
+            col = [d_tok_emb_acc[i][v] for i in range(d)]
+            g_tok[v] = [x + y for x, y in zip(g_tok[v], col)]
 
         # final norm backward uses d_hf (the grad w.r.t hf), not dlogits
         dx, dlnf_gain, dlnf_bias = self._ln_backward(d_hf, cache["lnf_cache"])
@@ -373,45 +397,55 @@ class TinyTransformer:
             # feed-forward branch
             dz = _bmm(dlayer_out, _transpose(layer["W2"]))
             dW2 = _outer_sum(lc["z"], dlayer_out)
+            gW2 = g[f"layer{li}.W2"]
             for i in range(self.ff):
-                for j in range(d):
-                    g[f"layer{li}.W2"][i][j] += dW2[i][j]
+                gW2[i] = [x + y for x, y in zip(gW2[i], dW2[i])]
             du = [
                 [_relu_backward(dz[b][t], lc["u"][b][t]) for t in range(T)]
                 for b in range(B)
             ]
             dW1 = _outer_sum(lc["h2"], du)
+            gW1 = g[f"layer{li}.W1"]
             for i in range(d):
-                for j in range(self.ff):
-                    g[f"layer{li}.W1"][i][j] += dW1[i][j]
+                gW1[i] = [x + y for x, y in zip(gW1[i], dW1[i])]
             dh2 = _bmm(du, _transpose(layer["W1"]))
             dx2, dln2g, dln2b = self._ln_backward(dh2, lc["ln2_cache"])
-            for i in range(d):
-                g[f"layer{li}.ln2_gain"][i] += dln2g[i]
-                g[f"layer{li}.ln2_bias"][i] += dln2b[i]
+            g[f"layer{li}.ln2_gain"] = [x + y for x, y in zip(g[f"layer{li}.ln2_gain"], dln2g)]
+            g[f"layer{li}.ln2_bias"] = [x + y for x, y in zip(g[f"layer{li}.ln2_bias"], dln2b)]
             dx_in = _add(dx_in, dx2)
 
             # attention branch: grad w.r.t o is G (layer output) + dx2 (ff path)
             do = _add(dlayer_out, dx2)
             da = _bmm(do, _transpose(layer["Wo"]))
             dWo = _outer_sum(lc["a"], do)
+            gWo = g[f"layer{li}.Wo"]
             for i in range(d):
-                for j in range(d):
-                    g[f"layer{li}.Wo"][i][j] += dWo[i][j]
+                gWo[i] = [x + y for x, y in zip(gWo[i], dWo[i])]
 
             dv = [[[0.0] * d for _ in range(T)] for _ in range(B)]
-            dw = [[[0.0] * T for _ in range(T)] for _ in range(B)]
+            dw = []
             for b in range(B):
-                for t in range(T):
-                    for s in range(t + 1):
-                        for i in range(d):
-                            dw[b][t][s] += da[b][t][i] * lc["v"][b][s][i]
+                da_b = da[b]
+                v_b = lc["v"][b]
+                zeros_tail = [0.0] * (T - 1)
+                dw.append(
+                    [
+                        [sum(map(mul, da_b[t], v_b[s])) for s in range(t + 1)]
+                        + zeros_tail[: T - t - 1]
+                        for t in range(T)
+                    ]
+                )
             for b in range(B):
+                dv_b = dv[b]
+                w_b = lc["w"][b]
+                da_b = da[b]
                 for s in range(T):
+                    acc = [0.0] * d
                     for t in range(s, T):
-                        ws = lc["w"][b][t][s]
-                        for i in range(d):
-                            dv[b][s][i] += ws * da[b][t][i]
+                        ws = w_b[t][s]
+                        da_bt = da_b[t]
+                        acc = [x + ws * y for x, y in zip(acc, da_bt)]
+                    dv_b[s] = acc
             dscores = [[[0.0] * T for _ in range(T)] for _ in range(B)]
             for b in range(B):
                 for t in range(T):
@@ -420,36 +454,44 @@ class TinyTransformer:
             dq = [[[0.0] * d for _ in range(T)] for _ in range(B)]
             dk = [[[0.0] * d for _ in range(T)] for _ in range(B)]
             for b in range(B):
+                dscores_b = dscores[b]
+                k_b = lc["k"][b]
+                q_b = lc["q"][b]
+                dq_b = dq[b]
+                dk_b = dk[b]
                 for t in range(T):
+                    dscores_bt = dscores_b[t]
+                    q_bt = q_b[t]
                     for s in range(t + 1):
-                        c = dscores[b][t][s] * scale
-                        for i in range(d):
-                            dq[b][t][i] += c * lc["k"][b][s][i]
-                            dk[b][s][i] += c * lc["q"][b][t][i]
+                        c = dscores_bt[s] * scale
+                        k_bs = k_b[s]
+                        dq_b[t] = [x + c * y for x, y in zip(dq_b[t], k_bs)]
+                        dk_b[s] = [x + c * y for x, y in zip(dk_b[s], q_bt)]
             dWq = _outer_sum(lc["h"], dq)
             dWk = _outer_sum(lc["h"], dk)
             dWv = _outer_sum(lc["h"], dv)
+            gWq = g[f"layer{li}.Wq"]
+            gWk = g[f"layer{li}.Wk"]
+            gWv = g[f"layer{li}.Wv"]
             for i in range(d):
-                for j in range(d):
-                    g[f"layer{li}.Wq"][i][j] += dWq[i][j]
-                    g[f"layer{li}.Wk"][i][j] += dWk[i][j]
-                    g[f"layer{li}.Wv"][i][j] += dWv[i][j]
+                gWq[i] = [x + y for x, y in zip(gWq[i], dWq[i])]
+                gWk[i] = [x + y for x, y in zip(gWk[i], dWk[i])]
+                gWv[i] = [x + y for x, y in zip(gWv[i], dWv[i])]
             dh = _bmm(dq, _transpose(layer["Wq"]))
             dh = _add(dh, _bmm(dk, _transpose(layer["Wk"])))
             dh = _add(dh, _bmm(dv, _transpose(layer["Wv"])))
             dx_ln, dln1g, dln1b = self._ln_backward(dh, lc["ln1_cache"])
-            for i in range(d):
-                g[f"layer{li}.ln1_gain"][i] += dln1g[i]
-                g[f"layer{li}.ln1_bias"][i] += dln1b[i]
+            g[f"layer{li}.ln1_gain"] = [x + y for x, y in zip(g[f"layer{li}.ln1_gain"], dln1g)]
+            g[f"layer{li}.ln1_bias"] = [x + y for x, y in zip(g[f"layer{li}.ln1_bias"], dln1b)]
             dx_in = _add(dx_in, dx_ln)
             dx = dx_in
 
         for b in range(B):
             for t in range(T):
                 tok = batch_ids[b][t]
-                for i in range(d):
-                    g["tok_emb"][tok][i] += dx[b][t][i]
-                    g["pos_emb"][t][i] += dx[b][t][i]
+                dx_bt = dx[b][t]
+                g["tok_emb"][tok] = [x + y for x, y in zip(g["tok_emb"][tok], dx_bt)]
+                g["pos_emb"][t] = [x + y for x, y in zip(g["pos_emb"][t], dx_bt)]
 
     def generate(self, ids, max_new=24):
         ctx_ids = ids[-self.ctx :]

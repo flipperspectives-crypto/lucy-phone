@@ -27,6 +27,7 @@ import json
 import math
 import random
 import sys
+from operator import mul
 
 # ---------------------------------------------------------------------------
 # Pure-stdlib model (mirrors training/tiny_transformer.py, inference-only path)
@@ -36,18 +37,17 @@ EPS = 1e-5
 
 
 def _bmm(X, W):
-    """Batched matmul: X (B,T,in) @ W (in,out) -> (B,T,out)."""
-    B, T = len(X), len(X[0])
-    out = [[[0.0] * len(W[0]) for _ in range(T)] for _ in range(B)]
-    for b in range(B):
-        for t in range(T):
-            row = X[b][t]
-            for j in range(len(W[0])):
-                s = 0.0
-                for k in range(len(W)):
-                    s += row[k] * W[k][j]
-                out[b][t][j] = s
-    return out
+    """Batched matmul: X (B,T,in) @ W (in,out) -> (B,T,out).
+
+    W is transposed once per call and dot products run through C-level
+    ``map(mul, ...)``; multiply/add order over k is unchanged vs the naive
+    triple loop, so results are bit-identical.
+    """
+    cols = list(zip(*W))
+    return [
+        [[sum(map(mul, xrow, col)) for col in cols] for xrow in batch]
+        for batch in X
+    ]
 
 
 def _add(a, b):
@@ -154,20 +154,24 @@ class TinyTransformer:
             w = [[[0.0] * T for _ in range(T)] for _ in range(B)]
             for b in range(B):
                 for t in range(T):
+                    q_bt = q[b][t]
                     logits_t = [
-                        sum(q[b][t][i] * k[b][s][i] for i in range(d)) * scale
+                        sum(map(mul, q_bt, k[b][s])) * scale
                         for s in range(t + 1)
                     ]
-                    w_bt = _softmax_row(logits_t)
-                    for s in range(t + 1):
-                        w[b][t][s] = w_bt[s]
-            a = [[[0.0] * d for _ in range(T)] for _ in range(B)]
+                    w[b][t] = _softmax_row(logits_t)
+            a = []
             for b in range(B):
+                a_b = []
                 for t in range(T):
+                    acc = [0.0] * d
+                    w_bt = w[b][t]
                     for s in range(t + 1):
-                        ws = w[b][t][s]
-                        for i in range(d):
-                            a[b][t][i] += ws * v[b][s][i]
+                        ws = w_bt[s]
+                        v_bs = v[b][s]
+                        acc = [ai + ws * vi for ai, vi in zip(acc, v_bs)]
+                    a_b.append(acc)
+                a.append(a_b)
             o = _bmm(a, layer["Wo"])
             x_attn = _add(x, o)
 
@@ -189,11 +193,13 @@ class TinyTransformer:
             )
 
         hf, lnf_cache = self._ln_forward(x, self.lnf_gain, self.lnf_bias)
-        logits = [[[0.0] * self.vocab for _ in range(T)] for _ in range(B)]
+        logits = []
         for b in range(B):
+            logits_b = []
             for t in range(T):
-                for v in range(self.vocab):
-                    logits[b][t][v] = sum(hf[b][t][i] * self.tok_emb[v][i] for i in range(d))
+                hf_bt = hf[b][t]
+                logits_b.append([sum(map(mul, hf_bt, emb_v)) for emb_v in self.tok_emb])
+            logits.append(logits_b)
         return logits
 
     def generate(self, ids, max_new=24, temperature=0.0):
