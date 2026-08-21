@@ -555,6 +555,142 @@ class TestTrainStatusScript(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestGradeScript(unittest.TestCase):
+    """The grader must honestly PASS/WARN/FAIL every checkpoint dimension."""
+
+    def _import(self):
+        import os
+        import sys
+
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+        )
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import grade_checkpoint  # noqa: E402
+
+        return grade_checkpoint
+
+    def test_tokenizer_roundtrips_clean_vs_mergeless(self):
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        from .helpers import trained_checkpoint
+
+        gc = self._import()
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            sd = json.loads(open(cp).read())
+            self.assertEqual(gc.tokenizer_problems(sd), [])
+            # a placeholder tokenizer state must be flagged, not waved through
+            bad = dict(sd)
+            bad["tokenizer"] = {}
+            problems = gc.tokenizer_problems(bad)
+            self.assertTrue(any("no learned merges" in p for p in problems))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_lineage_states(self):
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import tempfile
+
+        from .helpers import trained_checkpoint
+
+        gc = self._import()
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            db = os.path.join(tmp, "lineage.db")
+            sd = json.loads(open(cp).read())
+            run_id = sd.get("lineage_run_id")
+            self.assertTrue(run_id)
+            verdict, _ = gc.lineage_verdict(sd, db)
+            self.assertEqual(verdict, "PASS")
+
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "UPDATE training_runs SET status='RUNNING' WHERE run_id=?", (run_id,)
+            )
+            conn.commit()
+            conn.close()
+            verdict, _ = gc.lineage_verdict(sd, db)
+            self.assertEqual(verdict, "WARN")
+
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "UPDATE training_runs SET status='DONE', final_loss=99.0 WHERE run_id=?",
+                (run_id,),
+            )
+            conn.commit()
+            conn.close()
+            verdict, msg = gc.lineage_verdict(sd, db)
+            self.assertEqual(verdict, "FAIL")
+            self.assertIn("loss", msg)
+
+            # missing ledger file is WARN; unknown run id is FAIL
+            verdict, _ = gc.lineage_verdict(sd, os.path.join(tmp, "absent.db"))
+            self.assertEqual(verdict, "WARN")
+            verdict, _ = gc.lineage_verdict({"lineage_run_id": "ghost"}, db)
+            self.assertEqual(verdict, "FAIL")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_completion_grid_properties(self):
+        import os
+        import shutil
+        import tempfile
+
+        from .helpers import trained_checkpoint
+
+        gc = self._import()
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            prov = LocalLucyProvider(checkpoint_path=cp)
+            lines, problems, n_empty = gc.completion_grid(
+                prov, ["What is trust?"], [0.0, 0.9]
+            )
+            self.assertEqual(problems, [])
+            self.assertGreaterEqual(n_empty, 0)
+            joined = "\n".join(lines)
+            self.assertIn("USER: What is trust?", joined)
+            self.assertIn("T=0", joined)
+            self.assertIn("T=0.9", joined)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_main_exit_codes(self):
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        from .helpers import local_checkpoint, trained_checkpoint
+
+        gc = self._import()
+        self.assertEqual(gc.main(["--checkpoint", "/nonexistent.json"]), 2)
+        tmp = tempfile.mkdtemp()
+        try:
+            # untrained placeholder -> 2
+            untrained = local_checkpoint(tmp)
+            self.assertEqual(gc.main(["--checkpoint", untrained]), 2)
+            # fully graded trained fixture with its own ledger -> 0
+            cp = trained_checkpoint(tmp)
+            db = os.path.join(tmp, "lineage.db")
+            sd = json.loads(open(cp).read())
+            self.assertTrue(sd.get("lineage_run_id"))
+            rc = gc.main(["--checkpoint", cp, "--lineage", db])
+            self.assertEqual(rc, 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestProviderSampling(unittest.TestCase):
     def test_temperature_sampling_works(self):
         import asyncio, os, shutil, tempfile
