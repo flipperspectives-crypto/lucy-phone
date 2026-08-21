@@ -297,6 +297,61 @@ class TestTrainAndProvider(unittest.TestCase):
         self.assertEqual(tok.decode(tok.encode(sample)), sample)
 
 
+    def test_intermediate_snapshot_is_loadable_and_resumable(self):
+        """Crash-recovery contract: a mid-run latest.json snapshot must be
+        loadable by inference (with passing integrity probe) and resumable
+        with an additive step count."""
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        from training.train import _save_latest
+        from training.tiny_transformer import TinyTransformer
+
+        tmp = tempfile.mkdtemp()
+        try:
+            text = "Lucy is local and loyal. Truth first. " * 20
+            tok = BPETokenizer(target_vocab=512)
+            tok.train([text])
+            m = TinyTransformer(vocab=tok.vocab_size, d_model=16, ctx=16, n_layers=1, ff_mult=4, seed=1)
+            probe = tok.encode(text)[:16]
+
+            ck_dir = os.path.join(tmp, "ck")
+            os.makedirs(ck_dir)
+            snap = os.path.join(ck_dir, "latest.json")
+            _save_latest(snap, m, tok, probe, trained_steps=42, loss=3.21, run_id="runX")
+
+            sd = json.loads(open(snap).read())
+            self.assertEqual(sd["trained_steps"], 42)
+            # inference loads it and the integrity probe verifies the weights
+            prov = LocalLucyProvider(checkpoint_path=snap)
+            self.assertTrue(prov.self_check())
+
+            # resume continues from exactly that step count
+            summary = train(
+                repo_root=".",
+                corpus_text=text,
+                checkpoint_dir=ck_dir,
+                steps=5,
+                lr=0.05,
+                ctx=16,
+                d_model=16,
+                n_layers=1,
+                ff_mult=4,
+                seed=1,
+                batch_size=2,
+                stride=8,
+                lineage_db=os.path.join(tmp, "lineage.db"),
+                git_hash="t",
+                resume=True,
+            )
+            sd2 = json.loads(open(summary["latest"]).read())
+            self.assertEqual(sd2["trained_steps"], 47)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestTrainingStatusStates(unittest.TestCase):
     def _write(self, tmp, trained):
         import json, os

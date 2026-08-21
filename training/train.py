@@ -50,6 +50,33 @@ def _val_loss(m: "TinyTransformer", val_seqs: list[list[int]], n: int = 8) -> Op
     return sum(_sequence_loss(m, s) for s in sample) / len(sample)
 
 
+def _save_latest(
+    path: Path,
+    m: "TinyTransformer",
+    tok: "BPETokenizer",
+    probe_seq: list[int],
+    trained_steps: int,
+    loss: float,
+    run_id: str,
+) -> None:
+    """Crash-recovery snapshot of the CURRENT SGD state to ``latest.json``.
+
+    Fully loadable by inference (provider / tiny_infer) and resumable by
+    ``train(resume=True)``: carries weights, tokenizer, integrity probe, and
+    the step count reached so far. Unlike the final save (best-loss weights),
+    this captures the live trajectory point so an interrupted run continues
+    where it actually stopped.
+    """
+    sd = m.state_dict()
+    sd["trained_steps"] = trained_steps
+    sd["final_loss"] = loss
+    sd["probe_seq"] = probe_seq
+    sd["probe_loss"] = _sequence_loss(m, probe_seq)
+    sd["lineage_run_id"] = run_id
+    sd["tokenizer"] = tok.state_dict()
+    Path(path).write_text(json.dumps(sd))
+
+
 def train(
     repo_root: str | Path = ".",
     checkpoint_dir: str | Path = "training/checkpoints",
@@ -66,12 +93,18 @@ def train(
     git_hash: Optional[str] = None,
     corpus_text: Optional[str] = None,
     resume: bool = False,
+    checkpoint_every: int = 250,
 ) -> dict:
     """Train a tiny model and persist a checkpoint + lineage entry.
 
     When *resume* is True, loads the existing ``latest.json`` checkpoint and
     continues training from those weights and tokenizer state.  Otherwise a
     fresh model is initialised from random weights.
+
+    Every *checkpoint_every* steps a crash-recovery snapshot is written to
+    ``latest.json`` (current weights, not best-loss), so an interrupted run
+    loses at most that many steps. Resume with ``--resume`` and
+    ``--steps (target - saved)``; the step count is additive under resume.
 
     Returns a summary dict (also recorded in the lineage ledger).
     """
@@ -188,6 +221,19 @@ def train(
                 best_probe_loss = _sequence_loss(m, probe_seq)
             m.backward(batch_x, logits, cache, dlogits)
             m.apply_grad(lr)
+            if (
+                checkpoint_every
+                and (step + 1) % checkpoint_every == 0
+                and (step + 1) < steps
+            ):
+                _save_latest(
+                    latest_path, m, tok, probe_seq,
+                    prev_steps + step + 1,
+                    losses[-1] if losses else float("inf"),
+                    run.run_id,
+                )
+                ledger.update(run.run_id, steps=step + 1, final_loss=loss)
+                print(f"  [ckpt] step {prev_steps + step + 1} saved (loss {loss:.4f})")
             if (step + 1) % max(1, steps // 10) == 0:
                 ledger.update(run.run_id, steps=step + 1, final_loss=loss)
         final_loss = losses[-1] if losses else float("inf")
@@ -248,6 +294,8 @@ if __name__ == "__main__":
     ap.add_argument("--layers", type=int, default=1, help="transformer layer count (default 1)")
     ap.add_argument("--ff-mult", type=int, default=4, help="FF width multiplier (default 4)")
     ap.add_argument("--seed", type=int, default=1, help="RNG seed")
+    ap.add_argument("--checkpoint-every", type=int, default=250,
+                    help="crash-recovery snapshot interval in steps (0 disables; default 250)")
     ap.add_argument("--resume", action="store_true", help="resume from latest checkpoint")
     args = ap.parse_args()
 
@@ -267,5 +315,6 @@ if __name__ == "__main__":
         seed=args.seed,
         git_hash=ghash,
         resume=args.resume,
+        checkpoint_every=args.checkpoint_every,
     )
     print(json.dumps(summary, indent=2))
