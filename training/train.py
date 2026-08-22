@@ -87,6 +87,17 @@ def _save_latest(
     Path(path).write_text(json.dumps(sd))
 
 
+def _effective_lr(base_lr: float, done: int, total: int) -> float:
+    """Cosine-decayed LR for cumulative step *done* of *total*.
+
+    Decays from base_lr to 10% of it across the run. Keyed off the CUMULATIVE
+    step count (not the current invocation), so kill/resume runs that pass
+    ``--steps (remaining)`` still follow one smooth schedule.
+    """
+    frac = min(1.0, max(0.0, done / max(1, total)))
+    return base_lr * (0.10 + 0.90 * 0.5 * (1.0 + math.cos(math.pi * frac)))
+
+
 def train(
     repo_root: str | Path = ".",
     checkpoint_dir: str | Path = "training/checkpoints",
@@ -104,6 +115,7 @@ def train(
     corpus_text: Optional[str] = None,
     resume: bool = False,
     checkpoint_every: int = 250,
+    total_steps: Optional[int] = None,
 ) -> dict:
     """Train a tiny model and persist a checkpoint + lineage entry.
 
@@ -115,6 +127,11 @@ def train(
     ``latest.json`` (current weights, not best-loss), so an interrupted run
     loses at most that many steps. Resume with ``--resume`` and
     ``--steps (target - saved)``; the step count is additive under resume.
+
+    *total_steps* is the full length of the run for the cosine LR schedule;
+    when omitted it defaults to ``prev_steps + steps`` so a single invocation
+    still decays sensibly. Under resume, pass the real target via
+    ``--target-steps`` to keep the decay aligned with the whole run.
 
     Returns a summary dict (also recorded in the lineage ledger).
     """
@@ -140,6 +157,9 @@ def train(
     else:
         tok = BPETokenizer(target_vocab=512)
         tok.train([text])
+    # Cosine LR horizon: an explicit total_steps wins; otherwise decay across
+    # just this invocation (prev_steps + steps).
+    total = total_steps if total_steps is not None else prev_steps + steps
     token_ids = tok.encode(text)
     if not token_ids:
         raise RuntimeError("corpus is empty; nothing to train on")
@@ -186,6 +206,7 @@ def train(
                 "batch_size": batch_size,
                 "stride": stride,
                 "steps": steps,
+                "total_steps": total,
             },
             seed=seed,
             checkpoint_path=str(per_run_path),
@@ -206,10 +227,15 @@ def train(
             )
         rng = random.Random(seed)
         losses = []
+        lrs = []
         best_loss = float("inf")
         best_sd = None
         best_probe_loss = None
         for step in range(steps):
+            # Cosine-decayed LR keyed off the cumulative step count, so a
+            # kill/resume run keeps one smooth schedule instead of restarting
+            # it at full power every time.
+            step_lr = _effective_lr(lr, prev_steps + step + 1, total)
             batch = [rng.choice(seqs) for _ in range(batch_size)]
             # next-token targets: drop the first token as a target and the last
             # token as input, so we never pad the target with a null byte (which
@@ -225,12 +251,13 @@ def train(
                 # finite state is retained and training continues from there.
                 continue
             losses.append(loss)
+            lrs.append(step_lr)
             if loss < best_loss:
                 best_loss = loss
                 best_sd = json.loads(json.dumps(m.state_dict()))
                 best_probe_loss = _sequence_loss(m, probe_seq)
             m.backward(batch_x, logits, cache, dlogits)
-            m.apply_grad(lr)
+            m.apply_grad(step_lr)
             if (
                 checkpoint_every
                 and (step + 1) % checkpoint_every == 0
@@ -243,7 +270,10 @@ def train(
                     run.run_id,
                 )
                 ledger.update(run.run_id, steps=step + 1, final_loss=loss)
-                print(f"  [ckpt] step {prev_steps + step + 1} saved (loss {loss:.4f})")
+                print(
+                    f"  [ckpt] step {prev_steps + step + 1} saved "
+                    f"(loss {loss:.4f}, lr {step_lr:.4f})"
+                )
             if (step + 1) % max(1, steps // 10) == 0:
                 ledger.update(run.run_id, steps=step + 1, final_loss=loss)
         final_loss = losses[-1] if losses else float("inf")
@@ -277,6 +307,8 @@ def train(
             "final_loss_last": final_loss,
             "val_loss": val_loss,
             "steps": steps,
+            "lr_start": lrs[0] if lrs else None,
+            "lr_end": lrs[-1] if lrs else None,
             "git_hash": run.git_hash,
             "data_manifest_sha256": data_sha,
         }
@@ -307,6 +339,9 @@ if __name__ == "__main__":
     ap.add_argument("--checkpoint-every", type=int, default=250,
                     help="crash-recovery snapshot interval in steps (0 disables; default 250)")
     ap.add_argument("--resume", action="store_true", help="resume from latest checkpoint")
+    ap.add_argument("--target-steps", type=int, default=None,
+                    help="total run length for the cosine LR decay (defaults to "
+                         "saved steps + --steps); pass your real target when resuming")
     args = ap.parse_args()
 
     try:
@@ -326,5 +361,6 @@ if __name__ == "__main__":
         git_hash=ghash,
         resume=args.resume,
         checkpoint_every=args.checkpoint_every,
+        total_steps=args.target_steps,
     )
     print(json.dumps(summary, indent=2))

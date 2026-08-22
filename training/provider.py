@@ -40,6 +40,35 @@ def strip_at_turn_boundary(text: str) -> str:
     return text[:cut].rstrip()
 
 
+def rep_penalty_topk(
+    logits: list[float],
+    generated_ids: list[int],
+    penalty: float = 1.15,
+    top_k: int = 20,
+) -> list[float]:
+    """Deterministic logit adjustment: repetition penalty + top-k truncation.
+
+    Tokens already present in *generated_ids* get their logit divided by
+    *penalty* when positive and multiplied by it when negative -- pushing
+    repeats down either way. Everything outside the *top_k* highest adjusted
+    scores then becomes -inf so neither sampling nor argmax can select it.
+    Pure function over one logit row; applied on the greedy path too, so
+    decoding stays bit-reproducible (grade_checkpoint relies on that).
+    """
+    adjusted = list(logits)
+    for t in set(generated_ids):
+        v = adjusted[t]
+        adjusted[t] = v / penalty if v > 0 else v * penalty
+    k = int(top_k) if top_k else len(adjusted)
+    if 0 < k < len(adjusted):
+        keep = sorted(range(len(adjusted)), key=lambda i: adjusted[i], reverse=True)[:k]
+        keep_set = set(keep)
+        adjusted = [
+            v if i in keep_set else float("-inf") for i, v in enumerate(adjusted)
+        ]
+    return adjusted
+
+
 class LocalLucyProvider(BaseProvider):
     """Runs a locally trained TinyTransformer checkpoint.
 
@@ -51,9 +80,20 @@ class LocalLucyProvider(BaseProvider):
     kind = "local"
     simulated = False
 
-    def __init__(self, checkpoint_path: str | Path, model_name: str = "lucy-local"):
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        model_name: str = "lucy-local",
+        repetition_penalty: float = 1.15,
+        top_k: int = 20,
+    ):
         self.checkpoint_path = Path(checkpoint_path)
         self.model_name = model_name
+        # Decoding guards: a tiny greedy model otherwise collapses into
+        # token loops ("you you you"). Penalty=1 disables the rep guard,
+        # top_k<=0 disables truncation.
+        self.repetition_penalty = repetition_penalty
+        self.top_k = top_k
         self._tok = ByteTokenizer()
         self._model: Optional[TinyTransformer] = None
         self._loaded = False
@@ -184,12 +224,17 @@ class LocalLucyProvider(BaseProvider):
         max_new: int = 24,
         temperature: float = 0.0,
         stop_boundary: bool = False,
+        repetition_penalty: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> list[int]:
         """Greedy/temperature decode from token ids.
 
         With *stop_boundary*, generation halts as soon as the decoded text
         crosses into the next USER turn (or a blank-line block break), so chat
         responses end where the trained format says an answer ends.
+
+        *repetition_penalty* / *top_k* override the instance defaults; both
+        are applied deterministically before argmax or sampling.
         """
         m = self._ensure_loaded()
         if not ids:
@@ -197,12 +242,14 @@ class LocalLucyProvider(BaseProvider):
         import math as _math
         import random as _random
 
+        pen = self.repetition_penalty if repetition_penalty is None else repetition_penalty
+        k = self.top_k if top_k is None else top_k
         ctx_ids = ids[-m.ctx :] if len(ids) >= m.ctx else ids
         generated: list[int] = []
         for _ in range(max_new):
             window = ctx_ids[-m.ctx :]
             logits, _ = m.forward([window])
-            last = logits[0][-1]
+            last = rep_penalty_topk(logits[0][-1], generated, penalty=pen, top_k=k)
             if temperature and temperature > 0:
                 mx = max(last)
                 exps = [_math.exp((x - mx) / temperature) for x in last]
@@ -225,14 +272,30 @@ class LocalLucyProvider(BaseProvider):
                     break
         return generated
 
-    def _generate_tokens(self, prompt: str, max_new: int = 24, temperature: float = 0.0) -> list[int]:
+    def _generate_tokens(
+        self,
+        prompt: str,
+        max_new: int = 24,
+        temperature: float = 0.0,
+        repetition_penalty: Optional[float] = None,
+        top_k: Optional[int] = None,
+    ) -> list[int]:
         ids = self._tok.encode(prompt)
-        return self._generate_from_ids(ids, max_new=max_new, temperature=temperature)
+        return self._generate_from_ids(
+            ids, max_new=max_new, temperature=temperature,
+            repetition_penalty=repetition_penalty, top_k=top_k,
+        )
 
     async def generate(self, prompt: str, model: str, **options: Any) -> GenerationResult:
         max_new = int(options.get("max_new_tokens", options.get("max_new", 24)))
         temperature = float(options.get("temperature", 0.0))
-        ids = self._generate_tokens(prompt, max_new=max_new, temperature=temperature)
+        ids = self._generate_tokens(
+            prompt,
+            max_new=max_new,
+            temperature=temperature,
+            repetition_penalty=options.get("repetition_penalty"),
+            top_k=options.get("top_k"),
+        )
         text = self._tok.decode(ids)
         return GenerationResult(
             provider=self.name,
@@ -258,7 +321,12 @@ class LocalLucyProvider(BaseProvider):
         if len(ids) > cap:
             ids = ids[-cap:]
         gen_ids = self._generate_from_ids(
-            ids, max_new=max_new, temperature=temperature, stop_boundary=True
+            ids,
+            max_new=max_new,
+            temperature=temperature,
+            stop_boundary=True,
+            repetition_penalty=options.get("repetition_penalty"),
+            top_k=options.get("top_k"),
         )
         text = strip_at_turn_boundary(self._tok.decode(gen_ids))
         return ChatResponse(

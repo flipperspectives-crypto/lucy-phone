@@ -70,6 +70,25 @@ class TestCorpus(unittest.TestCase):
         self.assertIsInstance(manifest, list)
         self.assertGreater(len(manifest), 0)
 
+    def test_code_is_tracked_but_excluded_from_stream(self):
+        """Foundation .py files stay in the provenance manifest but must never
+        enter the training token stream -- they used to eat ~72% of SGD
+        windows, starving the dialogue model of actual conversation."""
+        corpus = curate(".")
+        kinds = {r.kind for r in corpus.manifest}
+        # code files are still provenance-recorded ...
+        self.assertIn("SOURCE_TEXT", kinds)
+        self.assertTrue(any(r.source.endswith(".py") for r in corpus.manifest))
+        # ... but their text never reaches training
+        self.assertNotIn("def ", corpus.text)
+        self.assertNotIn("import ", corpus.text)
+        for r in corpus.manifest:
+            if r.kind == "SOURCE_TEXT" and r.source.endswith(".py"):
+                self.assertNotIn(f"# SOURCE: {r.source}", corpus.text)
+        # dialogue is what remains
+        self.assertIn("USER:", corpus.text)
+        self.assertIn("LUCY:", corpus.text)
+
 
 class TestTinyTransformer(unittest.TestCase):
     def _batch(self, tok):
@@ -687,6 +706,174 @@ class TestGradeScript(unittest.TestCase):
             self.assertTrue(sd.get("lineage_run_id"))
             rc = gc.main(["--checkpoint", cp, "--lineage", db])
             self.assertEqual(rc, 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestLRSchedule(unittest.TestCase):
+    """Cosine decay must start at base LR, reach the 10% floor, and key off
+    the CUMULATIVE step count so additive kill/resume runs stay on schedule."""
+
+    def _train(self, tmp, steps, total_steps=None):
+        from training.train import train
+
+        return train(
+            repo_root=".",
+            corpus_text="Lucy is local and loyal. Truth first.\n",
+            checkpoint_dir=f"{tmp}/ck",
+            steps=steps,
+            lr=0.05,
+            ctx=16,
+            d_model=16,
+            n_layers=1,
+            ff_mult=4,
+            seed=1,
+            batch_size=2,
+            stride=8,
+            lineage_db=f"{tmp}/lineage.db",
+            git_hash="t",
+            total_steps=total_steps,
+        )
+
+    def test_full_run_decays_to_floor(self):
+        import os
+        import tempfile
+
+        tmp = tempfile.mkdtemp()
+        try:
+            s = self._train(tmp, steps=60)
+            self.assertIsNotNone(s["lr_start"])
+            self.assertIsNotNone(s["lr_end"])
+            # step 1 of 60: essentially full power
+            self.assertGreater(s["lr_start"], 0.9 * 0.05)
+            self.assertLessEqual(s["lr_start"], 0.05)
+            # final step: exactly at the 10% floor
+            self.assertAlmostEqual(s["lr_end"], 0.005, places=9)
+            self.assertLess(s["lr_end"], s["lr_start"])
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_partial_run_matches_cumulative_formula(self):
+        """steps=10 of a 100-step run must land where the formula says --
+        this is what keeps --target-steps resumes honest."""
+        import math
+        import os
+        import tempfile
+
+        from training.train import _effective_lr
+
+        tmp = tempfile.mkdtemp()
+        try:
+            s = self._train(tmp, steps=10, total_steps=100)
+            expected = _effective_lr(0.05, done=10, total=100)
+            self.assertAlmostEqual(s["lr_end"], expected, places=12)
+            # and it is still high up the curve, not at the floor
+            frac = 10 / 100
+            manual = 0.05 * (0.10 + 0.90 * 0.5 * (1 + math.cos(math.pi * frac)))
+            self.assertAlmostEqual(expected, manual, places=12)
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_default_horizon_is_invocation_scoped(self):
+        import os
+        import tempfile
+
+        from training.train import _effective_lr
+
+        tmp = tempfile.mkdtemp()
+        try:
+            # no total_steps passed -> decays across prev_steps(0) + steps
+            s = self._train(tmp, steps=30)
+            self.assertAlmostEqual(
+                s["lr_end"], _effective_lr(0.05, done=30, total=30), places=12
+            )
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRepPenaltyTopK(unittest.TestCase):
+    """Deterministic decoding guards against token-loop collapse."""
+
+    def test_positive_logits_penalized_down(self):
+        from training.provider import rep_penalty_topk
+
+        adj = rep_penalty_topk([4.0, 2.0, 1.0], [0], penalty=2.0, top_k=0)
+        self.assertEqual(adj[0], 2.0)   # generated token pushed down ...
+        self.assertEqual(adj[1], 2.0)   # ... into a tie with the runner-up
+        self.assertEqual(adj[2], 1.0)
+
+    def test_negative_logits_penalized_further_down(self):
+        from training.provider import rep_penalty_topk
+
+        adj = rep_penalty_topk([-1.0, 3.0], [0], penalty=2.0, top_k=0)
+        self.assertEqual(adj[0], -2.0)
+        self.assertEqual(adj[1], 3.0)
+
+    def test_topk_truncates_to_minus_inf(self):
+        from training.provider import rep_penalty_topk
+
+        adj = rep_penalty_topk([5.0, 4.0, 3.0, 1.0], [], penalty=1.15, top_k=2)
+        self.assertEqual(adj[0], 5.0)
+        self.assertEqual(adj[1], 4.0)
+        self.assertEqual(adj[2], float("-inf"))
+        self.assertEqual(adj[3], float("-inf"))
+
+    def test_penalty_can_break_a_greedy_tie_out_of_the_loop(self):
+        """The exact 'you you you' failure: argmax would re-pick the same
+        token forever; after penalizing it once, the runner-up wins."""
+        from training.provider import rep_penalty_topk
+
+        logits = [6.0, 5.9]
+        first = max(range(len(logits)), key=lambda v: logits[v])
+        adjusted = rep_penalty_topk(logits, [first], penalty=1.15, top_k=0)
+        second = max(range(len(adjusted)), key=lambda v: adjusted[v])
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 1)
+
+    def test_input_row_never_mutated(self):
+        from training.provider import rep_penalty_topk
+
+        row = [4.0, 2.0, 1.0]
+        rep_penalty_topk(row, [0], penalty=2.0, top_k=2)
+        self.assertEqual(row, [4.0, 2.0, 1.0])
+
+    def test_greedy_decode_stays_deterministic_with_guards(self):
+        """Guards are pure functions of state -> two greedy runs identical
+        (grade_checkpoint's determinism check depends on this)."""
+        import asyncio
+        import os
+        import shutil
+        import tempfile
+
+        from .helpers import trained_checkpoint
+
+        tmp = tempfile.mkdtemp()
+        try:
+            cp = trained_checkpoint(tmp)
+            prov = LocalLucyProvider(checkpoint_path=cp, model_name="lucy-local")
+            a = asyncio.run(
+                prov.generate("USER: What is trust?", model="lucy-local",
+                              max_new_tokens=16, temperature=0.0)
+            ).text
+            b = asyncio.run(
+                prov.generate("USER: What is trust?", model="lucy-local",
+                              max_new_tokens=16, temperature=0.0)
+            ).text
+            self.assertEqual(a, b)
+
+            # disabling both guards via options must also work (escape hatch)
+            c = asyncio.run(
+                prov.generate("USER: What is trust?", model="lucy-local",
+                              max_new_tokens=8, temperature=0.0,
+                              repetition_penalty=1.0, top_k=0)
+            )
+            self.assertIsInstance(c.text, str)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

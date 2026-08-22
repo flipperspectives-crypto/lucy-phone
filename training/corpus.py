@@ -10,6 +10,13 @@ ingested without a provenance record.
 Synthesized foundation examples (derived only from the repo's own loyalty and
 grounding contracts) are tagged ``SYNTHESIZED_FROM_FOUNDATION`` so the lineage
 ledger can distinguish owned source text from constructed training prompts.
+
+Dialogue-only training stream: every source is provenance-tagged in the
+manifest, but only USER:/LUCY: dialogue text (training/data/*.txt plus the
+synthesized examples) enters the token stream. Raw Python source used to
+dominate training windows (~72% of tokens), so a tiny dialogue model spent
+its capacity learning code syntax instead of conversation. The code stays
+recorded -- it just no longer teaches the chat model.
 """
 
 from __future__ import annotations
@@ -145,12 +152,18 @@ def _synthesized_foundation_examples() -> str:
 
 
 def curate(repo_root: str | Path = ".") -> Corpus:
-    """Build a provenance-tagged corpus from the repo's own foundation texts."""
+    """Build a provenance-tagged, dialogue-only corpus for chat training.
+
+    Every eligible source (including the repo's own Python foundation code) is
+    recorded in the manifest with full provenance, but only USER:/LUCY:
+    dialogue text enters the training token stream.
+    """
     repo_root = Path(repo_root)
     now = time.time()
     parts: list[str] = []
     manifest: list[ProvenanceRecord] = []
 
+    # Foundation code files: provenance-tracked, excluded from the stream.
     for rel in ALLOWED_SOURCES:
         content = _read_repo_file(repo_root, rel)
         if content is None:
@@ -166,7 +179,6 @@ def curate(repo_root: str | Path = ".") -> Corpus:
                 kind="SOURCE_TEXT",
             )
         )
-        parts.append(f"\n# SOURCE: {rel}\n{content}\n")
 
     for rel, content in _read_data_dir(repo_root):
         data = content.encode("utf-8", "replace")
